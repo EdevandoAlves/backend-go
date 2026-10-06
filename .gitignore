@@ -1,0 +1,26 @@
+# Go build output and coverage
+*.exe
+*.exe~
+*.test
+*.out
+/bin/
+coverage.out
+coverage.html
+
+# Local environment (keep the template)
+.env
+.env.*
+!.env.example
+
+# Docker/local service volumes
+/volumes/
+/docker-data/
+/postgres-data/
+/localstack-data/
+/keycloak-data/
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+.cache/
