@@ -26,3 +26,15 @@ func TestWalletLedgerEntryValidatesMath(t *testing.T) {
 		t.Fatal("currency mismatch accepted")
 	}
 }
+
+func TestWalletLedgerEntryRejectsNegativeBalances(t *testing.T) {
+	amount, _ := ParseMoney("1.00", "BRL")
+	negative, _ := NewMoneyForInternal(-1, "BRL")
+	zero, _ := Zero("BRL")
+	if _, err := NewWalletLedgerEntry("l", "w", "t", LedgerCredit, amount, negative, zero); !errors.Is(err, ErrInvalidLedgerEntry) {
+		t.Fatal("negative before accepted")
+	}
+	if _, err := NewWalletLedgerEntry("l", "w", "t", LedgerDebit, amount, amount, negative); !errors.Is(err, ErrInvalidLedgerEntry) {
+		t.Fatal("negative after accepted")
+	}
+}

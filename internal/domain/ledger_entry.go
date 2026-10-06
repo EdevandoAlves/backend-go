@@ -14,7 +14,7 @@ type WalletLedgerEntry struct {
 }
 
 func NewWalletLedgerEntry(id, walletID, transactionID string, direction LedgerDirection, amount, before, after Money) (WalletLedgerEntry, error) {
-	if id == "" || walletID == "" || transactionID == "" || (direction != LedgerDebit && direction != LedgerCredit) || amount.MinorUnits() <= 0 || before.Currency() != amount.Currency() || after.Currency() != amount.Currency() {
+	if id == "" || walletID == "" || transactionID == "" || (direction != LedgerDebit && direction != LedgerCredit) || amount.MinorUnits() <= 0 || before.MinorUnits() < 0 || after.MinorUnits() < 0 || before.Currency() != amount.Currency() || after.Currency() != amount.Currency() {
 		return WalletLedgerEntry{}, ErrInvalidLedgerEntry
 	}
 	var expected Money
