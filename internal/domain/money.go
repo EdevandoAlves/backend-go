@@ -22,23 +22,23 @@ func ParseMoney(amount, currency string) (Money, error) {
 	if whole == "" || fraction[0] < '0' || fraction[0] > '9' || fraction[1] < '0' || fraction[1] > '9' {
 		return Money{}, ErrInvalidMoney
 	}
-	var dollars int64
+	var wholeUnits int64
 	maxDollars := (maxInt64 - int64(fraction[0]-'0')*10 - int64(fraction[1]-'0')) / 100
 	for i := 0; i < len(whole); i++ {
 		if whole[i] < '0' || whole[i] > '9' {
 			return Money{}, ErrInvalidMoney
 		}
 		digit := int64(whole[i] - '0')
-		if dollars > (maxDollars-digit)/10 {
+		if wholeUnits > (maxDollars-digit)/10 {
 			return Money{}, ErrMoneyOverflow
 		}
-		dollars = dollars*10 + digit
+		wholeUnits = wholeUnits*10 + digit
 	}
 	minor := int64(fraction[0]-'0')*10 + int64(fraction[1]-'0')
-	if dollars > (maxInt64-minor)/100 {
+	if wholeUnits > (maxInt64-minor)/100 {
 		return Money{}, ErrMoneyOverflow
 	}
-	return Money{cents: dollars*100 + minor, currency: currency}, nil
+	return Money{cents: wholeUnits*100 + minor, currency: currency}, nil
 }
 
 const (
