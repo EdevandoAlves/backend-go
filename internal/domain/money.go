@@ -1,0 +1,161 @@
+package domain
+
+import (
+	"encoding/json"
+	"errors"
+	"strconv"
+)
+
+type Money struct {
+	cents    int64
+	currency string
+}
+
+func ParseMoney(amount, currency string) (Money, error) {
+	if err := validateCurrency(currency); err != nil {
+		return Money{}, err
+	}
+	if len(amount) < 4 || amount[len(amount)-3] != '.' {
+		return Money{}, ErrInvalidMoney
+	}
+	whole, fraction := amount[:len(amount)-3], amount[len(amount)-2:]
+	if whole == "" || fraction[0] < '0' || fraction[0] > '9' || fraction[1] < '0' || fraction[1] > '9' {
+		return Money{}, ErrInvalidMoney
+	}
+	var dollars int64
+	maxDollars := (maxInt64 - int64(fraction[0]-'0')*10 - int64(fraction[1]-'0')) / 100
+	for i := 0; i < len(whole); i++ {
+		if whole[i] < '0' || whole[i] > '9' {
+			return Money{}, ErrInvalidMoney
+		}
+		digit := int64(whole[i] - '0')
+		if dollars > (maxDollars-digit)/10 {
+			return Money{}, ErrMoneyOverflow
+		}
+		dollars = dollars*10 + digit
+	}
+	minor := int64(fraction[0]-'0')*10 + int64(fraction[1]-'0')
+	if dollars > (maxInt64-minor)/100 {
+		return Money{}, ErrMoneyOverflow
+	}
+	return Money{cents: dollars*100 + minor, currency: currency}, nil
+}
+
+const maxInt64 = int64(^uint64(0) >> 1)
+
+func NewMoneyForInternal(minor int64, currency string) (Money, error) {
+	if err := validateCurrency(currency); err != nil {
+		return Money{}, err
+	}
+	return Money{cents: minor, currency: currency}, nil
+}
+
+func Zero(currency string) (Money, error) { return NewMoneyForInternal(0, currency) }
+
+func (m Money) MinorUnits() int64 { return m.cents }
+func (m Money) Currency() string  { return m.currency }
+
+func (m Money) String() string {
+	return amountString(m.cents) + " " + m.currency
+}
+
+func (m Money) Add(other Money) (Money, error) {
+	if err := sameCurrency(m, other); err != nil {
+		return Money{}, err
+	}
+	if other.cents > 0 && m.cents > int64(^uint64(0)>>1)-other.cents || other.cents < 0 && m.cents < -int64(^uint64(0)>>1)-1-other.cents {
+		return Money{}, ErrMoneyOverflow
+	}
+	return Money{cents: m.cents + other.cents, currency: m.currency}, nil
+}
+
+func (m Money) Subtract(other Money) (Money, error) {
+	if err := sameCurrency(m, other); err != nil {
+		return Money{}, err
+	}
+	if other.cents == -int64(^uint64(0)>>1)-1 || (other.cents < 0 && m.cents > int64(^uint64(0)>>1)+other.cents) || (other.cents > 0 && m.cents < -int64(^uint64(0)>>1)-1+other.cents) {
+		return Money{}, ErrMoneyOverflow
+	}
+	return Money{cents: m.cents - other.cents, currency: m.currency}, nil
+}
+
+func (m Money) Negate() (Money, error) {
+	if m.cents == -int64(^uint64(0)>>1)-1 {
+		return Money{}, ErrMoneyOverflow
+	}
+	return Money{cents: -m.cents, currency: m.currency}, nil
+}
+
+func (m Money) Compare(other Money) (int, error) {
+	if err := sameCurrency(m, other); err != nil {
+		return 0, err
+	}
+	if m.cents < other.cents {
+		return -1, nil
+	}
+	if m.cents > other.cents {
+		return 1, nil
+	}
+	return 0, nil
+}
+
+func (m Money) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Amount   string `json:"amount"`
+		Currency string `json:"currency"`
+	}{amountString(m.cents), m.currency})
+}
+
+func (m *Money) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Amount   json.RawMessage `json:"amount"`
+		Currency string          `json:"currency"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return errors.Join(ErrInvalidMoney, err)
+	}
+	if len(raw.Amount) == 0 || raw.Amount[0] != '"' {
+		return ErrInvalidMoney
+	}
+	var amount string
+	if err := json.Unmarshal(raw.Amount, &amount); err != nil {
+		return errors.Join(ErrInvalidMoney, err)
+	}
+	parsed, err := ParseMoney(amount, raw.Currency)
+	if err != nil {
+		return err
+	}
+	*m = parsed
+	return nil
+}
+
+func validateCurrency(currency string) error {
+	if len(currency) != 3 {
+		return ErrInvalidCurrency
+	}
+	for i := range currency {
+		if currency[i] < 'A' || currency[i] > 'Z' {
+			return ErrInvalidCurrency
+		}
+	}
+	return nil
+}
+
+func sameCurrency(a, b Money) error {
+	if a.currency != b.currency {
+		return ErrCurrencyMismatch
+	}
+	return nil
+}
+func amountString(cents int64) string {
+	if cents >= 0 {
+		return strconv.FormatInt(cents/100, 10) + "." + twoDigits(cents%100)
+	}
+	whole := -(cents / 100)
+	fraction := -(cents % 100)
+	return "-" + strconv.FormatInt(whole, 10) + "." + twoDigits(fraction)
+}
+func twoDigits(n int64) string { return string([]byte{'0' + byte(n/10), '0' + byte(n%10)}) }
+
+var _ json.Marshaler = Money{}
+var _ json.Unmarshaler = (*Money)(nil)
