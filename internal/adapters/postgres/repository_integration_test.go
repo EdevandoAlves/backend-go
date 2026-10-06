@@ -75,7 +75,7 @@ func fixture(t *testing.T, tx pgx.Tx, id, player string) (domain.Wallet, domain.
 	if err := (TransactionRepository{}).InsertOpening(context.Background(), tx, opening, money, 1); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := domain.NewWalletLedgerEntry("ledger-"+id, id, opening.ID(), domain.LedgerCredit, money, zero, money)
+	entry, err := domain.NewWalletLedgerEntry("ledger-"+id, id, opening.ID(), domain.LedgerCredit, money, zero, money, now)
 	if err != nil {
 		t.Fatal(err)
 	}

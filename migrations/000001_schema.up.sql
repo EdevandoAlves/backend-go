@@ -49,21 +49,26 @@ CREATE TABLE wager_transactions (
             AND payload_hash IS NULL AND game_id IS NULL AND round_id IS NULL
             AND reference_external_id IS NULL AND reference_transaction_id IS NULL
             AND failure_code IS NULL AND result_currency = currency
+            AND result_balance_minor IS NOT NULL AND result_currency IS NOT NULL
             AND result_balance_minor = amount_minor AND result_wallet_version IS NOT NULL)
         OR
         (origin = 'EXTERNAL' AND kind <> 'OPENING'
-            AND btrim(provider_id) <> '' AND btrim(external_id) <> ''
-            AND btrim(idempotency_key) <> '' AND payload_hash ~ '^[0-9a-f]{64}$'
-            AND btrim(game_id) <> '' AND btrim(round_id) <> '')
+            AND provider_id IS NOT NULL AND btrim(provider_id) <> ''
+            AND external_id IS NOT NULL AND btrim(external_id) <> ''
+            AND idempotency_key IS NOT NULL AND btrim(idempotency_key) <> ''
+            AND payload_hash IS NOT NULL AND payload_hash ~ '^[0-9a-f]{64}$'
+            AND game_id IS NOT NULL AND btrim(game_id) <> ''
+            AND round_id IS NOT NULL AND btrim(round_id) <> '')
     ),
     CHECK ((kind = 'LOSS' AND amount_minor = 0) OR (kind <> 'LOSS' AND amount_minor > 0)),
     CHECK ((kind IN ('REFUND', 'ROLLBACK') AND reference_external_id IS NOT NULL AND btrim(reference_external_id) <> '')
-        OR (kind NOT IN ('REFUND', 'ROLLBACK') AND reference_external_id IS NULL)),
+        OR (kind = 'WIN' AND (reference_external_id IS NULL OR btrim(reference_external_id) <> ''))
+        OR (kind IN ('BET', 'LOSS', 'OPENING') AND reference_external_id IS NULL)),
     CHECK ((status = 'PENDING_REFERENCE') = (next_attempt_at IS NOT NULL)),
     CHECK (status = 'PENDING_REFERENCE' OR attempt_count = 0 OR next_attempt_at IS NOT NULL),
     CHECK ((status IN ('REJECTED', 'FAILED') AND failure_code IS NOT NULL AND failure_code ~ '^[A-Z][A-Z0-9_]*$')
         OR (status NOT IN ('REJECTED', 'FAILED') AND failure_code IS NULL)),
-    CHECK ((status IN ('PROCESSED', 'REJECTED') AND result_balance_minor IS NOT NULL AND result_currency = currency AND result_wallet_version IS NOT NULL)
+    CHECK ((status IN ('PROCESSED', 'REJECTED') AND result_balance_minor IS NOT NULL AND result_currency IS NOT NULL AND result_currency = currency AND result_wallet_version IS NOT NULL)
         OR (status IN ('PENDING', 'PENDING_REFERENCE', 'FAILED') AND result_balance_minor IS NULL AND result_currency IS NULL AND result_wallet_version IS NULL)),
     CHECK (status = 'PENDING_REFERENCE' OR reference_transaction_id IS NOT NULL OR kind NOT IN ('REFUND', 'ROLLBACK')),
     CHECK (status <> 'PENDING_REFERENCE' OR (origin = 'EXTERNAL' AND kind IN ('REFUND', 'ROLLBACK') AND reference_transaction_id IS NULL AND next_attempt_at IS NOT NULL)),

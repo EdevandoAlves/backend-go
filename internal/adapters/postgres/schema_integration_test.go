@@ -66,9 +66,9 @@ func testConstraints(t *testing.T, conn *pgx.Conn) {
 		_, err := conn.Exec(ctx, sql, args...)
 		return err
 	}
-	mustFail := func(name, state, sql string) {
+	mustFail := func(name, state, sql string, args ...any) {
 		t.Helper()
-		err := exec(sql)
+		err := exec(sql, args...)
 		if err == nil {
 			t.Fatalf("%s unexpectedly succeeded", name)
 		}
@@ -97,6 +97,30 @@ func testConstraints(t *testing.T, conn *pgx.Conn) {
 	mustFail("zero opening", "23514", "INSERT INTO wager_transactions(id,origin,player_id,wallet_id,kind,amount_minor,currency,status) VALUES ('o0','INTERNAL','p1','w1','OPENING',0,'BRL','PROCESSED')")
 	mustFail("external opening", "23514", "INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status) VALUES ('eo','EXTERNAL','e','pr','k','"+hash+"','p1','w1','g','r','OPENING',100,'BRL','PROCESSED')")
 	mustFail("invalid hash", "23514", "INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status) VALUES ('bad','EXTERNAL','e','pr','kb','BAD','p1','w1','g','r','LOSS',0,'BRL','PROCESSED')")
+	for _, field := range []string{"provider_id", "external_id", "idempotency_key", "payload_hash", "game_id", "round_id"} {
+		columns := "id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,result_balance_minor,result_currency,result_wallet_version"
+		values := "'null-" + field + "','EXTERNAL','e-null','pr-null','k-null','" + hash + "','p1','w1','g','r','LOSS',0,'BRL','PROCESSED',0,'BRL',1"
+		literal := map[string]string{"provider_id": "'pr-null'", "external_id": "'e-null'", "idempotency_key": "'k-null'", "payload_hash": "'" + hash + "'", "game_id": "'g'", "round_id": "'r'"}[field]
+		values = strings.Replace(values, literal, "NULL", 1)
+		mustFail("external NULL "+field, "23514", "INSERT INTO wager_transactions("+columns+") VALUES ("+values+")")
+	}
+	for _, field := range []string{"result_balance_minor", "result_currency", "result_wallet_version"} {
+		columns := "id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,result_balance_minor,result_currency,result_wallet_version"
+		values := "'processed-null-" + field + "','EXTERNAL','e-" + field + "','pr-" + field + "','k-" + field + "','" + hash + "','p1','w1','g','r','LOSS',0,'BRL','PROCESSED',0,'BRL',1"
+		switch field {
+		case "result_balance_minor":
+			values = strings.Replace(values, ",'PROCESSED',0,'BRL',1", ",'PROCESSED',NULL,'BRL',1", 1)
+		case "result_currency":
+			values = strings.Replace(values, ",'PROCESSED',0,'BRL',1", ",'PROCESSED',0,NULL,1", 1)
+		case "result_wallet_version":
+			values = strings.Replace(values, ",'PROCESSED',0,'BRL',1", ",'PROCESSED',0,'BRL',NULL", 1)
+		}
+		mustFail("processed missing "+field, "23514", "INSERT INTO wager_transactions("+columns+") VALUES ("+values+")")
+		rejected := strings.Replace(values, "'processed-null-", "'rejected-null-", 1)
+		rejected = strings.Replace(rejected, "'PROCESSED'", "'REJECTED'", 1)
+		rejected = rejected + ", 'REJECTED_CODE'"
+		mustFail("rejected missing "+field, "23514", "INSERT INTO wager_transactions("+columns+",failure_code) VALUES ("+rejected+")")
+	}
 
 	insertExternal := func(id, provider, external, key string, status string) {
 		t.Helper()

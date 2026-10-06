@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 type LedgerDirection string
 
 const (
@@ -11,10 +13,11 @@ type WalletLedgerEntry struct {
 	id, walletID, transactionID string
 	direction                   LedgerDirection
 	amount, before, after       Money
+	createdAt                   time.Time
 }
 
-func NewWalletLedgerEntry(id, walletID, transactionID string, direction LedgerDirection, amount, before, after Money) (WalletLedgerEntry, error) {
-	if id == "" || walletID == "" || transactionID == "" || (direction != LedgerDebit && direction != LedgerCredit) || amount.MinorUnits() <= 0 || before.MinorUnits() < 0 || after.MinorUnits() < 0 || before.Currency() != amount.Currency() || after.Currency() != amount.Currency() {
+func NewWalletLedgerEntry(id, walletID, transactionID string, direction LedgerDirection, amount, before, after Money, createdAt time.Time) (WalletLedgerEntry, error) {
+	if id == "" || walletID == "" || transactionID == "" || createdAt.IsZero() || (direction != LedgerDebit && direction != LedgerCredit) || amount.MinorUnits() <= 0 || before.MinorUnits() < 0 || after.MinorUnits() < 0 || before.Currency() != amount.Currency() || after.Currency() != amount.Currency() {
 		return WalletLedgerEntry{}, ErrInvalidLedgerEntry
 	}
 	var expected Money
@@ -27,7 +30,11 @@ func NewWalletLedgerEntry(id, walletID, transactionID string, direction LedgerDi
 	if err != nil || expected.MinorUnits() != after.MinorUnits() {
 		return WalletLedgerEntry{}, ErrInvalidLedgerEntry
 	}
-	return WalletLedgerEntry{id: id, walletID: walletID, transactionID: transactionID, direction: direction, amount: amount, before: before, after: after}, nil
+	return WalletLedgerEntry{id: id, walletID: walletID, transactionID: transactionID, direction: direction, amount: amount, before: before, after: after, createdAt: createdAt}, nil
+}
+
+func RehydrateWalletLedgerEntry(id, walletID, transactionID string, direction LedgerDirection, amount, before, after Money, createdAt time.Time) (WalletLedgerEntry, error) {
+	return NewWalletLedgerEntry(id, walletID, transactionID, direction, amount, before, after, createdAt)
 }
 
 func (e WalletLedgerEntry) ID() string                 { return e.id }
@@ -37,3 +44,4 @@ func (e WalletLedgerEntry) Direction() LedgerDirection { return e.direction }
 func (e WalletLedgerEntry) Amount() Money              { return e.amount }
 func (e WalletLedgerEntry) Before() Money              { return e.before }
 func (e WalletLedgerEntry) After() Money               { return e.after }
+func (e WalletLedgerEntry) CreatedAt() time.Time       { return e.createdAt }

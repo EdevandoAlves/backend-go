@@ -124,3 +124,26 @@ func TestMoneyJSONUsesStringAmount(t *testing.T) {
 		t.Fatalf("number amount error = %v", err)
 	}
 }
+
+func TestInvalidZeroMoneyIsRejectedByPublicOperations(t *testing.T) {
+	zero := Money{}
+	valid, _ := ParseMoney("1.00", "BRL")
+	if _, err := zero.Add(valid); !errors.Is(err, ErrInvalidMoney) {
+		t.Errorf("zero Add error = %v", err)
+	}
+	if _, err := zero.Subtract(valid); !errors.Is(err, ErrInvalidMoney) {
+		t.Errorf("zero Subtract error = %v", err)
+	}
+	if _, err := zero.Negate(); !errors.Is(err, ErrInvalidMoney) {
+		t.Errorf("zero Negate error = %v", err)
+	}
+	if _, err := zero.Compare(valid); !errors.Is(err, ErrInvalidMoney) {
+		t.Errorf("zero Compare error = %v", err)
+	}
+	if _, err := json.Marshal(zero); !errors.Is(err, ErrInvalidMoney) {
+		t.Errorf("zero MarshalJSON error = %v", err)
+	}
+	if _, err := valid.Add(zero); !errors.Is(err, ErrInvalidMoney) {
+		t.Errorf("invalid other Add error = %v", err)
+	}
+}

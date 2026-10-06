@@ -63,6 +63,12 @@ func (m Money) String() string {
 }
 
 func (m Money) Add(other Money) (Money, error) {
+	if err := m.validate(); err != nil {
+		return Money{}, err
+	}
+	if err := other.validate(); err != nil {
+		return Money{}, err
+	}
 	if err := sameCurrency(m, other); err != nil {
 		return Money{}, err
 	}
@@ -76,6 +82,12 @@ func (m Money) Add(other Money) (Money, error) {
 }
 
 func (m Money) Subtract(other Money) (Money, error) {
+	if err := m.validate(); err != nil {
+		return Money{}, err
+	}
+	if err := other.validate(); err != nil {
+		return Money{}, err
+	}
 	if err := sameCurrency(m, other); err != nil {
 		return Money{}, err
 	}
@@ -95,6 +107,9 @@ func (m Money) Subtract(other Money) (Money, error) {
 }
 
 func (m Money) Negate() (Money, error) {
+	if err := m.validate(); err != nil {
+		return Money{}, err
+	}
 	if m.cents == minInt64 {
 		return Money{}, ErrMoneyOverflow
 	}
@@ -115,6 +130,9 @@ func (m Money) Compare(other Money) (int, error) {
 }
 
 func (m Money) MarshalJSON() ([]byte, error) {
+	if err := m.validate(); err != nil {
+		return nil, err
+	}
 	return json.Marshal(struct {
 		Amount   string `json:"amount"`
 		Currency string `json:"currency"`
@@ -152,8 +170,21 @@ func validateCurrency(currency string) error {
 }
 
 func sameCurrency(a, b Money) error {
+	if err := a.validate(); err != nil {
+		return err
+	}
+	if err := b.validate(); err != nil {
+		return err
+	}
 	if a.currency != b.currency {
 		return ErrCurrencyMismatch
+	}
+	return nil
+}
+
+func (m Money) validate() error {
+	if m.currency != "BRL" && m.currency != "USD" {
+		return ErrInvalidMoney
 	}
 	return nil
 }

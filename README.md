@@ -15,7 +15,7 @@ O serviço será composto por uma API HTTP e um consumidor SQS que usam o mesmo 
 
 ## Estado atual
 
-O projeto possui bootstrap HTTP com Uber Fx, health checks e domínio inicial para dinheiro, carteira, transação e ledger. As integrações com PostgreSQL, SQS e OIDC serão adicionadas nas próximas etapas.
+O projeto possui bootstrap HTTP com Uber Fx, health checks, domínio financeiro e integração PostgreSQL com migrations e testes de integração reais. HTTP de apostas, SQS e OIDC ainda não estão implementados.
 
 ## Execução atual
 
@@ -36,10 +36,14 @@ GET /health/live
 GET /health/ready
 ```
 
-## Testes
+## Testes executados
 
 ```bash
 go test ./...
 go test -race ./...
 go build ./...
+TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/s25_server_integration_test?sslmode=disable' go test -tags=integration ./internal/adapters/postgres
+TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/s25_server_integration_test?sslmode=disable' go test -race -tags=integration ./internal/adapters/postgres
 ```
+
+Os testes de integração exigem `TEST_DATABASE_URL` apontando para PostgreSQL real. O nome do banco deve conter `_test`; o exemplo acima usa `s25_server_integration_test`.
