@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/EdevandoAlves/backend-go/internal/application"
 	"github.com/EdevandoAlves/backend-go/internal/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -82,7 +83,7 @@ func fixture(t *testing.T, tx pgx.Tx, id, player string) (domain.Wallet, domain.
 	if err := (LedgerRepository{}).Insert(context.Background(), tx, entry); err != nil {
 		t.Fatal(err)
 	}
-	event := OutboxEvent{ID: "event-" + id, AggregateID: id, TransactionID: opening.ID(), EventType: "WagerTransactionProcessed", CorrelationID: id, EventVersion: 1, Payload: []byte(`{"wallet":"` + id + `"}`)}
+	event := application.OutboxEvent{ID: "event-" + id, AggregateID: id, TransactionID: opening.ID(), EventType: "WagerTransactionProcessed", CorrelationID: id, EventVersion: 1, Payload: []byte(`{"wallet":"` + id + `"}`)}
 	if err := (OutboxRepository{}).Insert(context.Background(), tx, event); err != nil {
 		t.Fatal(err)
 	}
