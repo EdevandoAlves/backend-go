@@ -41,7 +41,10 @@ func ParseMoney(amount, currency string) (Money, error) {
 	return Money{cents: dollars*100 + minor, currency: currency}, nil
 }
 
-const maxInt64 = int64(^uint64(0) >> 1)
+const (
+	maxInt64 = int64(^uint64(0) >> 1)
+	minInt64 = -maxInt64 - 1
+)
 
 func NewMoneyForInternal(minor int64, currency string) (Money, error) {
 	if err := validateCurrency(currency); err != nil {
@@ -63,7 +66,10 @@ func (m Money) Add(other Money) (Money, error) {
 	if err := sameCurrency(m, other); err != nil {
 		return Money{}, err
 	}
-	if other.cents > 0 && m.cents > int64(^uint64(0)>>1)-other.cents || other.cents < 0 && m.cents < -int64(^uint64(0)>>1)-1-other.cents {
+	if other.cents > 0 && m.cents > maxInt64-other.cents {
+		return Money{}, ErrMoneyOverflow
+	}
+	if other.cents < 0 && m.cents < minInt64-other.cents {
 		return Money{}, ErrMoneyOverflow
 	}
 	return Money{cents: m.cents + other.cents, currency: m.currency}, nil
@@ -73,14 +79,23 @@ func (m Money) Subtract(other Money) (Money, error) {
 	if err := sameCurrency(m, other); err != nil {
 		return Money{}, err
 	}
-	if other.cents == -int64(^uint64(0)>>1)-1 || (other.cents < 0 && m.cents > int64(^uint64(0)>>1)+other.cents) || (other.cents > 0 && m.cents < -int64(^uint64(0)>>1)-1+other.cents) {
+	if other.cents == minInt64 {
+		if m.cents >= 0 {
+			return Money{}, ErrMoneyOverflow
+		}
+		return Money{cents: maxInt64 + (m.cents + 1), currency: m.currency}, nil
+	}
+	if other.cents < 0 && m.cents > maxInt64+other.cents {
+		return Money{}, ErrMoneyOverflow
+	}
+	if other.cents > 0 && m.cents < minInt64+other.cents {
 		return Money{}, ErrMoneyOverflow
 	}
 	return Money{cents: m.cents - other.cents, currency: m.currency}, nil
 }
 
 func (m Money) Negate() (Money, error) {
-	if m.cents == -int64(^uint64(0)>>1)-1 {
+	if m.cents == minInt64 {
 		return Money{}, ErrMoneyOverflow
 	}
 	return Money{cents: -m.cents, currency: m.currency}, nil
@@ -130,13 +145,8 @@ func (m *Money) UnmarshalJSON(data []byte) error {
 }
 
 func validateCurrency(currency string) error {
-	if len(currency) != 3 {
+	if currency != "BRL" && currency != "USD" {
 		return ErrInvalidCurrency
-	}
-	for i := range currency {
-		if currency[i] < 'A' || currency[i] > 'Z' {
-			return ErrInvalidCurrency
-		}
 	}
 	return nil
 }

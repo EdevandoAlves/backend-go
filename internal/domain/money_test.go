@@ -32,13 +32,17 @@ func TestMoneyParsingAndValidation(t *testing.T) {
 			t.Errorf("ParseMoney(%q) error = %v", input, err)
 		}
 	}
-	for _, currency := range []string{"", "brl", "BR", "BRLL", "B1L"} {
+	for _, currency := range []string{"", "brl", "BR", "BRLL", "B1L", "ABC"} {
 		if _, err := ParseMoney("1.00", currency); !errors.Is(err, ErrInvalidCurrency) {
 			t.Errorf("currency %q error = %v", currency, err)
 		}
 	}
 	if _, err := ParseMoney("92233720368547758.08", "BRL"); !errors.Is(err, ErrMoneyOverflow) {
 		t.Fatalf("parse overflow error = %v", err)
+	}
+	canonical, err := ParseMoney("025.00", "BRL")
+	if err != nil || canonical.MinorUnits() != 2500 || canonical.String() != "25.00 BRL" {
+		t.Fatalf("canonical parse = %#v, %v", canonical, err)
 	}
 }
 
@@ -89,6 +93,17 @@ func TestMoneyOperationOverflow(t *testing.T) {
 	}
 	if _, err := min.Subtract(one); !errors.Is(err, ErrMoneyOverflow) {
 		t.Error("subtract overflow not detected")
+	}
+	minusOne, _ := NewMoneyForInternal(-1, "BRL")
+	if got, err := minusOne.Subtract(min); err != nil || got.MinorUnits() != math.MaxInt64 {
+		t.Fatalf("-1 - MinInt64 = %d, %v; want MaxInt64", got.MinorUnits(), err)
+	}
+	zero, _ := Zero("BRL")
+	if _, err := zero.Subtract(min); !errors.Is(err, ErrMoneyOverflow) {
+		t.Error("0 - MinInt64 overflow not detected")
+	}
+	if _, err := min.Add(minusOne); !errors.Is(err, ErrMoneyOverflow) {
+		t.Error("MinInt64 + (-1) overflow not detected")
 	}
 	if _, err := min.Negate(); !errors.Is(err, ErrMoneyOverflow) {
 		t.Error("negate overflow not detected")
