@@ -42,7 +42,7 @@ func CreateWagerTransaction(id, externalID, providerID, playerID, walletID strin
 
 func CreateOpeningWagerTransaction(id, playerID, walletID string, amount Money, now time.Time) (WagerTransaction, error) {
 	amount, err := validateTransactionMoney(amount)
-	if err != nil || id == "" || playerID == "" || walletID == "" || amount.MinorUnits() < 0 {
+	if err != nil || id == "" || playerID == "" || walletID == "" || amount.MinorUnits() <= 0 {
 		return WagerTransaction{}, ErrInvalidTransaction
 	}
 	return WagerTransaction{id: id, playerID: playerID, walletID: walletID, type_: TransactionOpening, amount: amount, status: TransactionProcessed, createdAt: now, updatedAt: now}, nil
@@ -54,7 +54,7 @@ func RehydrateWagerTransaction(id, externalID, providerID, playerID, walletID st
 		return WagerTransaction{}, ErrInvalidTransaction
 	}
 	if kind == TransactionOpening {
-		if id == "" || playerID == "" || walletID == "" || externalID != "" || providerID != "" || referenceExternalID != "" || status != TransactionProcessed || amount.MinorUnits() < 0 {
+		if id == "" || playerID == "" || walletID == "" || externalID != "" || providerID != "" || referenceExternalID != "" || status != TransactionProcessed || amount.MinorUnits() <= 0 {
 			return WagerTransaction{}, ErrInvalidTransaction
 		}
 		return WagerTransaction{id: id, playerID: playerID, walletID: walletID, type_: kind, amount: amount, status: status, createdAt: createdAt, updatedAt: updatedAt}, nil

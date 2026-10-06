@@ -51,6 +51,13 @@ func TestOpeningWagerTransactionUsesInternalIdentity(t *testing.T) {
 	}
 }
 
+func TestOpeningWagerTransactionRejectsZeroAmount(t *testing.T) {
+	zero, _ := Zero("BRL")
+	if _, err := CreateOpeningWagerTransaction("opening-1", "player", "wallet", zero, time.Now()); !errors.Is(err, ErrInvalidTransaction) {
+		t.Fatalf("zero opening accepted: %v", err)
+	}
+}
+
 func TestExternalWagerTransactionRejectsOpening(t *testing.T) {
 	amount, _ := ParseMoney("1.00", "BRL")
 	if _, err := CreateWagerTransaction("id", "ext", "provider", "player", "wallet", TransactionOpening, amount, time.Now()); !errors.Is(err, ErrInvalidTransaction) {
@@ -83,6 +90,13 @@ func TestRehydrateOpeningWagerTransaction(t *testing.T) {
 	tx, err := RehydrateWagerTransaction("opening-1", "", "", "player", "wallet", TransactionOpening, amount, TransactionProcessed, "", now, now)
 	if err != nil || tx.Type() != TransactionOpening || tx.Status() != TransactionProcessed || tx.Amount() != amount {
 		t.Fatalf("rehydrate opening = %#v, %v", tx, err)
+	}
+}
+
+func TestRehydrateOpeningRejectsZeroAmount(t *testing.T) {
+	zero, _ := Zero("BRL")
+	if _, err := RehydrateWagerTransaction("opening-zero", "", "", "player", "wallet", TransactionOpening, zero, TransactionProcessed, "", time.Now(), time.Now()); !errors.Is(err, ErrInvalidTransaction) {
+		t.Fatalf("zero opening accepted during rehydration: %v", err)
 	}
 }
 
