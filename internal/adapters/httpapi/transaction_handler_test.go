@@ -145,6 +145,41 @@ func TestTransactionHandlerMethodAndNilDependencies(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+func TestTransactionHandlerReplayRejectedUsesPersistedResult(t *testing.T) {
+	e := &fakeExecutor{result: application.ProcessWagerResult{
+		TransactionID:    "original",
+		Status:           domain.TransactionRejected,
+		FailureCode:      "INSUFFICIENT_FUNDS",
+		Balance:          mustMoney(t, "0.00"),
+		IdempotentReplay: true,
+	}}
+	w := httptest.NewRecorder()
+	handler(e, fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}).ServeHTTP(w, request(`{"providerId":"provider","externalId":"external","playerId":"player","walletId":"wallet","gameId":"game","roundId":"round","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out wagerResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.TransactionID != "original" || !out.IdempotentReplay || out.FailureCode != "INSUFFICIENT_FUNDS" {
+		t.Fatalf("response=%+v", out)
+	}
+}
+
+func TestTransactionHandlerMapsIdempotencyAndExternalConflicts(t *testing.T) {
+	for _, conflict := range []error{application.ErrIdempotencyConflict, application.ErrExternalIDConflict} {
+		t.Run(conflict.Error(), func(t *testing.T) {
+			e := &fakeExecutor{err: conflict}
+			w := httptest.NewRecorder()
+			handler(e, fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}).ServeHTTP(w, request(`{"providerId":"provider","externalId":"external","playerId":"player","walletId":"wallet","gameId":"game","roundId":"round","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`))
+			if w.Code != http.StatusConflict {
+				t.Fatalf("status=%d", w.Code)
+			}
+		})
+	}
+}
 func mustMoney(t *testing.T, s string) domain.Money {
 	t.Helper()
 	m, e := domain.ParseMoney(s, "BRL")

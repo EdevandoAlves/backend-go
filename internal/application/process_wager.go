@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"github.com/EdevandoAlves/backend-go/internal/domain"
 	"github.com/jackc/pgx/v5"
 	"strconv"
@@ -66,22 +67,37 @@ func wagerMoney(m domain.Money) wagerMoneyPayload {
 	return wagerMoneyPayload{Amount: strconv.FormatInt(n/100, 10) + "." + strconv.FormatInt((n%100)/10, 10) + strconv.FormatInt(n%10, 10), Currency: m.Currency()}
 }
 
-func CanonicalWagerHash(c ProcessWagerCommand) string {
+func CanonicalWagerHash(c ProcessWagerCommand) (string, error) {
 	v := struct {
-		ProviderID, ExternalID, PlayerID, WalletID, GameID, RoundID string
-		Kind                                                        domain.WagerTransactionType
-		Amount                                                      domain.Money
-	}{c.ProviderID, c.ExternalID, c.PlayerID, c.WalletID, c.GameID, c.RoundID, c.Kind, c.Amount}
-	b, _ := json.Marshal(v)
+		Version           string `json:"version"`
+		ProviderID        string `json:"providerId"`
+		ExternalID        string `json:"externalId"`
+		PlayerID          string `json:"playerId"`
+		WalletID          string `json:"walletId"`
+		GameID            string `json:"gameId"`
+		RoundID           string `json:"roundId"`
+		Kind              string `json:"kind"`
+		AmountMinor       int64  `json:"amountMinor"`
+		Currency          string `json:"currency"`
+		ReferenceExternal string `json:"referenceExternalId"`
+	}{"v1", c.ProviderID, c.ExternalID, c.PlayerID, c.WalletID, c.GameID, c.RoundID, string(c.Kind), c.Amount.MinorUnits(), c.Amount.Currency(), ""}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
 	s := sha256.Sum256(b)
-	return hex.EncodeToString(s[:])
+	return hex.EncodeToString(s[:]), nil
 }
 
 type ProcessWagerResult struct {
-	Status        domain.WagerTransactionStatus
-	FailureCode   string
-	Balance       domain.Money
-	WalletVersion int64
+	TransactionID          string
+	ExternalID             string
+	Status                 domain.WagerTransactionStatus
+	FailureCode            string
+	Balance                domain.Money
+	WalletVersion          int64
+	IdempotentReplay       bool
+	CreatedAt, ProcessedAt time.Time
 }
 
 func (s ProcessWagerService) Execute(ctx context.Context, c ProcessWagerCommand) error {
@@ -92,11 +108,19 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 	if c.ID == "" || c.ProviderID == "" || c.ExternalID == "" || c.IdempotencyKey == "" || c.PlayerID == "" || c.WalletID == "" || c.GameID == "" || c.RoundID == "" || c.Now.IsZero() || (c.Kind != domain.TransactionBet && c.Kind != domain.TransactionWin && c.Kind != domain.TransactionLoss) {
 		return ProcessWagerResult{}, domain.ErrInvalidTransaction
 	}
+	hash, err := CanonicalWagerHash(c)
+	if err != nil {
+		return ProcessWagerResult{}, err
+	}
 	var result ProcessWagerResult
-	err := s.Manager.WithinTransaction(ctx, func(tx pgx.Tx) error {
+	err = s.Manager.WithinTransaction(ctx, func(tx pgx.Tx) error {
+		t, e := domain.CreateExternalWagerTransaction(domain.WagerTransactionInput{ID: c.ID, ExternalID: c.ExternalID, ProviderID: c.ProviderID, PlayerID: c.PlayerID, WalletID: c.WalletID, IdempotencyKey: c.IdempotencyKey, PayloadHash: hash, GameID: c.GameID, RoundID: c.RoundID, Kind: c.Kind, Amount: c.Amount}, c.Now)
+		if e != nil {
+			return e
+		}
 		w, e := s.Wallet.GetForUpdate(ctx, tx, c.WalletID)
 		if e != nil {
-			if s.IsNotFound != nil && s.IsNotFound(e) {
+			if (s.IsNotFound != nil && s.IsNotFound(e)) || errors.Is(e, ErrNotFound) {
 				return ErrWalletNotFound
 			}
 			return e
@@ -104,12 +128,34 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 		if w.PlayerID() != c.PlayerID {
 			return ErrWalletNotFound
 		}
-		t, e := domain.CreateExternalWagerTransaction(domain.WagerTransactionInput{ID: c.ID, ExternalID: c.ExternalID, ProviderID: c.ProviderID, PlayerID: c.PlayerID, WalletID: c.WalletID, IdempotencyKey: c.IdempotencyKey, PayloadHash: CanonicalWagerHash(c), GameID: c.GameID, RoundID: c.RoundID, Kind: c.Kind, Amount: c.Amount}, c.Now)
+		inserted, e := s.Transactions.TryInsertExternalPending(ctx, tx, t)
 		if e != nil {
 			return e
 		}
-		if e = s.Transactions.InsertExternalPending(ctx, tx, t); e != nil {
-			return e
+		if !inserted {
+			existing, e := s.Transactions.GetExternalByIdempotencyKey(ctx, tx, c.ProviderID, c.IdempotencyKey)
+			if e == nil {
+				if existing.PayloadHash() != hash {
+					return ErrIdempotencyConflict
+				}
+				r, ok := existing.Result()
+				if !ok {
+					return ErrConflict
+				}
+				result = ProcessWagerResult{TransactionID: existing.ID(), ExternalID: existing.ExternalID(), Status: existing.Status(), FailureCode: existing.FailureCode(), Balance: r.Balance, WalletVersion: r.WalletVersion, IdempotentReplay: true, CreatedAt: existing.CreatedAt(), ProcessedAt: existing.UpdatedAt()}
+				return nil
+			}
+			if !errors.Is(e, ErrNotFound) {
+				return e
+			}
+			existing, e = s.Transactions.GetExternalByExternalID(ctx, tx, c.ProviderID, c.ExternalID)
+			if e == nil {
+				return ErrExternalIDConflict
+			}
+			if !errors.Is(e, ErrNotFound) {
+				return e
+			}
+			return ErrConflict
 		}
 		if s.AfterStep != nil {
 			if e = s.AfterStep("afterPending"); e != nil {
@@ -124,7 +170,7 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 			if e = s.Transactions.UpdateTerminal(ctx, tx, t); e != nil {
 				return e
 			}
-			result = ProcessWagerResult{Status: t.Status(), FailureCode: t.FailureCode(), Balance: r.Balance, WalletVersion: r.WalletVersion}
+			result = ProcessWagerResult{TransactionID: t.ID(), ExternalID: t.ExternalID(), Status: t.Status(), FailureCode: t.FailureCode(), Balance: r.Balance, WalletVersion: r.WalletVersion, CreatedAt: t.CreatedAt(), ProcessedAt: t.UpdatedAt()}
 			return s.insertRejected(ctx, tx, c, t, r)
 		}
 		before := w.Balance()
@@ -137,7 +183,7 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 				if e = s.Transactions.UpdateTerminal(ctx, tx, t); e != nil {
 					return e
 				}
-				result = ProcessWagerResult{Status: t.Status(), FailureCode: t.FailureCode(), Balance: r.Balance, WalletVersion: r.WalletVersion}
+				result = ProcessWagerResult{TransactionID: t.ID(), ExternalID: t.ExternalID(), Status: t.Status(), FailureCode: t.FailureCode(), Balance: r.Balance, WalletVersion: r.WalletVersion, CreatedAt: t.CreatedAt(), ProcessedAt: t.UpdatedAt()}
 				return s.insertRejected(ctx, tx, c, t, r)
 			}
 			changed = true
@@ -192,7 +238,7 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 				return e
 			}
 		}
-		result = ProcessWagerResult{Status: t.Status(), FailureCode: t.FailureCode(), Balance: w.Balance(), WalletVersion: w.Version()}
+		result = ProcessWagerResult{TransactionID: t.ID(), ExternalID: t.ExternalID(), Status: t.Status(), FailureCode: t.FailureCode(), Balance: w.Balance(), WalletVersion: w.Version(), CreatedAt: t.CreatedAt(), ProcessedAt: t.UpdatedAt()}
 		return nil
 	})
 	return result, err

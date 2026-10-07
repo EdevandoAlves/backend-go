@@ -72,6 +72,37 @@ func TestProcessWagerIntegration(t *testing.T) {
 	if e = s.Execute(ctx, win); e != nil {
 		t.Fatal(e)
 	}
+	if replay, e := s.ExecuteResult(ctx, command("ins", domain.TransactionBet, money(t, "1000.00"))); e != nil || !replay.IdempotentReplay || replay.Status != domain.TransactionRejected || replay.FailureCode != "INSUFFICIENT_FUNDS" || replay.Balance.MinorUnits() != 7500 {
+		t.Fatalf("rejected replay=%+v err=%v", replay, e)
+	}
+	var beforeLedger, beforeEvents int
+	if e = pool.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries").Scan(&beforeLedger); e != nil {
+		t.Fatal(e)
+	}
+	if e = pool.QueryRow(ctx, "SELECT count(*) FROM outbox_events").Scan(&beforeEvents); e != nil {
+		t.Fatal(e)
+	}
+	changed := command("changed", domain.TransactionBet, money(t, "1.00"))
+	changed.IdempotencyKey = "key-ins"
+	changed.ExternalID = "new-external"
+	if _, e = s.ExecuteResult(ctx, changed); !errors.Is(e, application.ErrIdempotencyConflict) {
+		t.Fatalf("idempotency conflict=%v", e)
+	}
+	externalConflict := command("external-conflict", domain.TransactionBet, money(t, "1.00"))
+	externalConflict.ExternalID = "ext-ins"
+	if _, e = s.ExecuteResult(ctx, externalConflict); !errors.Is(e, application.ErrExternalIDConflict) {
+		t.Fatalf("external conflict=%v", e)
+	}
+	var afterLedger, afterEvents int
+	if e = pool.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries").Scan(&afterLedger); e != nil {
+		t.Fatal(e)
+	}
+	if e = pool.QueryRow(ctx, "SELECT count(*) FROM outbox_events").Scan(&afterEvents); e != nil {
+		t.Fatal(e)
+	}
+	if beforeLedger != afterLedger || beforeEvents != afterEvents {
+		t.Fatalf("conflict effects ledger %d/%d events %d/%d", beforeLedger, afterLedger, beforeEvents, afterEvents)
+	}
 	loss := command("loss", domain.TransactionLoss, money(t, "0.00"))
 	if e = s.Execute(ctx, loss); e != nil {
 		t.Fatal(e)
@@ -88,8 +119,18 @@ func TestProcessWagerIntegration(t *testing.T) {
 	if e = s.Execute(ctx, dup); e != nil {
 		t.Fatal(e)
 	}
-	if e = s.Execute(ctx, dup); !errors.Is(e, application.ErrConflict) {
-		t.Fatalf("duplicate=%v", e)
+	if replay, e := s.ExecuteResult(ctx, dup); e != nil || !replay.IdempotentReplay || replay.TransactionID != "dup" {
+		t.Fatalf("duplicate replay=%+v err=%v", replay, e)
+	}
+	p.Close()
+	p, e = postgres.NewPool(ctx, url)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer p.Close()
+	s = application.ProcessWagerService{Manager: postgres.NewTxManager(p), Wallet: postgres.WalletRepository{}, Transactions: postgres.TransactionRepository{}, Ledger: postgres.LedgerRepository{}, Outbox: postgres.OutboxRepository{}}
+	if replay, e := s.ExecuteResult(ctx, dup); e != nil || !replay.IdempotentReplay || replay.TransactionID != "dup" {
+		t.Fatalf("restart replay=%+v err=%v", replay, e)
 	}
 	s.AfterStep = func(step string) error {
 		if step == "afterTerminal" {
@@ -210,6 +251,179 @@ func TestProcessWagerConcurrentBets(t *testing.T) {
 	if events != 3 {
 		t.Fatalf("outbox events=%d", events)
 	}
+}
+
+func TestProcessWagerHistoricalReplay(t *testing.T) {
+	ctx, pool, url := integrationDatabase(t)
+
+	p, err := postgres.NewPool(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	s := application.ProcessWagerService{Manager: postgres.NewTxManager(p), Wallet: postgres.WalletRepository{}, Transactions: postgres.TransactionRepository{}, Ledger: postgres.LedgerRepository{}, Outbox: postgres.OutboxRepository{}}
+	seed(t, pool)
+
+	original := command("historical-original", domain.TransactionBet, money(t, "25.00"))
+	if _, err = s.ExecuteResult(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Execute(ctx, command("historical-win", domain.TransactionWin, money(t, "25.00"))); err != nil {
+		t.Fatal(err)
+	}
+
+	var beforeLedger, beforeEvents int
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries").Scan(&beforeLedger); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM outbox_events").Scan(&beforeEvents); err != nil {
+		t.Fatal(err)
+	}
+	replay := original
+	replay.ID = "historical-replay"
+	replay.TransactionID = "replay-ledger"
+	replay.ProcessedEventID = "replay-processed"
+	replay.RejectedEventID = "replay-rejected"
+	replay.BalanceEventID = "replay-balance"
+	replay.Now = original.Now.Add(time.Minute)
+	result, err := s.ExecuteResult(ctx, replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IdempotentReplay || result.TransactionID != original.ID || result.Balance.MinorUnits() != 7500 {
+		t.Fatalf("historical replay=%+v", result)
+	}
+	var afterLedger, afterEvents int
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries").Scan(&afterLedger); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM outbox_events").Scan(&afterEvents); err != nil {
+		t.Fatal(err)
+	}
+	if beforeLedger != afterLedger || beforeEvents != afterEvents {
+		t.Fatalf("replay effects ledger %d/%d events %d/%d", beforeLedger, afterLedger, beforeEvents, afterEvents)
+	}
+}
+
+func TestProcessWagerConcurrentIdenticalReplay(t *testing.T) {
+	ctx, pool, url := integrationDatabase(t)
+	seed(t, pool)
+
+	p1, err := postgres.NewPool(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p1.Close()
+	p2, err := postgres.NewPool(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p2.Close()
+	service1 := application.ProcessWagerService{Manager: postgres.NewTxManager(p1), Wallet: postgres.WalletRepository{}, Transactions: postgres.TransactionRepository{}, Ledger: postgres.LedgerRepository{}, Outbox: postgres.OutboxRepository{}}
+	service2 := application.ProcessWagerService{Manager: postgres.NewTxManager(p2), Wallet: postgres.WalletRepository{}, Transactions: postgres.TransactionRepository{}, Ledger: postgres.LedgerRepository{}, Outbox: postgres.OutboxRepository{}}
+	now := time.Now().UTC()
+	first := command("identical-a", domain.TransactionBet, money(t, "25.00"))
+	first.ProviderID = "same-provider"
+	first.ExternalID = "same-external"
+	first.IdempotencyKey = "same-key"
+	first.Now = now
+	second := first
+	second.ID = "identical-b"
+	second.TransactionID = "identical-b-ledger"
+	second.ProcessedEventID = "identical-b-processed"
+	second.RejectedEventID = "identical-b-rejected"
+	second.BalanceEventID = "identical-b-balance"
+
+	start := make(chan struct{})
+	type outcome struct {
+		result application.ProcessWagerResult
+		err    error
+	}
+	results := make(chan outcome, 2)
+	go func() { <-start; result, err := service1.ExecuteResult(ctx, first); results <- outcome{result, err} }()
+	go func() { <-start; result, err := service2.ExecuteResult(ctx, second); results <- outcome{result, err} }()
+	close(start)
+	got := []outcome{<-results, <-results}
+	var transactionID string
+	processed, replayed := 0, 0
+	for _, result := range got {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if transactionID == "" {
+			transactionID = result.result.TransactionID
+		}
+		if result.result.TransactionID != transactionID {
+			t.Fatalf("transaction IDs differ: %q and %q", transactionID, result.result.TransactionID)
+		}
+		if result.result.IdempotentReplay {
+			replayed++
+		} else {
+			processed++
+		}
+	}
+	if processed != 1 || replayed != 1 {
+		t.Fatalf("processed=%d replayed=%d", processed, replayed)
+	}
+	var balance int64
+	if err = pool.QueryRow(ctx, "SELECT balance_minor FROM wallets WHERE id='wallet'").Scan(&balance); err != nil || balance != 7500 {
+		t.Fatalf("balance=%d err=%v", balance, err)
+	}
+	var transactions, ledger, events int
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM wager_transactions WHERE wallet_id='wallet' AND kind='BET'").Scan(&transactions); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE wallet_id='wallet' AND direction='DEBIT'").Scan(&ledger); err != nil {
+		t.Fatal(err)
+	}
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM outbox_events WHERE aggregate_id='wallet'").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if transactions != 1 || ledger != 1 || events != 2 {
+		t.Fatalf("transactions=%d ledger=%d events=%d", transactions, ledger, events)
+	}
+}
+
+func integrationDatabase(t *testing.T) (context.Context, *pgxpool.Pool, string) {
+	t.Helper()
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" || !strings.Contains(url, "_test") {
+		t.Fatal("TEST_DATABASE_URL must target a _test database")
+	}
+	root, err := filepath.Abs("../../")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up1, err := os.ReadFile(filepath.Join(root, "migrations/000001_schema.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	up2, err := os.ReadFile(filepath.Join(root, "migrations/000002_wager_currency.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	down1, err := os.ReadFile(filepath.Join(root, "migrations/000001_schema.down.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	down2, err := os.ReadFile(filepath.Join(root, "migrations/000002_wager_currency.down.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"+string(up1)+string(up2)); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, string(down2)+string(down1))
+		pool.Close()
+	})
+	return ctx, pool, url
 }
 
 func command(id string, k domain.WagerTransactionType, m domain.Money) application.ProcessWagerCommand {

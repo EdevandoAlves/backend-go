@@ -105,7 +105,7 @@ func (h TransactionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(e, application.ErrWalletNotFound):
 			http.Error(w, "not found", 404)
-		case errors.Is(e, application.ErrConflict):
+		case errors.Is(e, application.ErrConflict), errors.Is(e, application.ErrIdempotencyConflict), errors.Is(e, application.ErrExternalIDConflict):
 			http.Error(w, "conflict", 409)
 		case errors.Is(e, domain.ErrInvalidTransaction):
 			http.Error(w, "invalid transaction", 400)
@@ -115,10 +115,17 @@ func (h TransactionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := 201
-	if res.Status == domain.TransactionRejected {
+	responseID := res.TransactionID
+	if responseID == "" {
+		responseID = id
+	}
+	if res.IdempotentReplay {
+		status = 200
+	}
+	if res.Status == domain.TransactionRejected && !res.IdempotentReplay {
 		status = 422
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(wagerResponse{TransactionID: id, Status: string(res.Status), Balance: res.Balance, FailureCode: res.FailureCode})
+	json.NewEncoder(w).Encode(wagerResponse{TransactionID: responseID, Status: string(res.Status), Balance: res.Balance, IdempotentReplay: res.IdempotentReplay, FailureCode: res.FailureCode})
 }

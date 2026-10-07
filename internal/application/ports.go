@@ -10,6 +10,9 @@ import (
 
 var ErrWalletNotFound = errors.New("wallet not found")
 var ErrConflict = errors.New("conflict")
+var ErrIdempotencyConflict = errors.New("idempotency conflict")
+var ErrExternalIDConflict = errors.New("external id conflict")
+var ErrNotFound = errors.New("not found")
 
 type TransactionRunner interface {
 	WithinTransaction(context.Context, func(pgx.Tx) error) error
@@ -25,7 +28,10 @@ type OpeningWriter interface {
 
 type ExternalTransactionWriter interface {
 	InsertExternalPending(context.Context, pgx.Tx, domain.WagerTransaction) error
+	TryInsertExternalPending(context.Context, pgx.Tx, domain.WagerTransaction) (bool, error)
 	UpdateTerminal(context.Context, pgx.Tx, domain.WagerTransaction) error
+	GetExternalByIdempotencyKey(context.Context, pgx.Tx, string, string) (domain.WagerTransaction, error)
+	GetExternalByExternalID(context.Context, pgx.Tx, string, string) (domain.WagerTransaction, error)
 }
 
 type LedgerWriter interface {
