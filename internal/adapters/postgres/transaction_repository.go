@@ -31,6 +31,9 @@ func (r TransactionRepository) GetExternalByIdempotencyKey(ctx context.Context, 
 func (r TransactionRepository) GetExternalByExternalID(ctx context.Context, tx pgx.Tx, provider, id string) (domain.WagerTransaction, error) {
 	return r.getExternal(ctx, tx, `WHERE origin='EXTERNAL' AND provider_id=$1 AND external_id=$2`, provider, id)
 }
+func (r TransactionRepository) ClaimPendingReference(ctx context.Context, tx pgx.Tx, now time.Time) (domain.WagerTransaction, error) {
+	return r.getExternal(ctx, tx, `WHERE origin='EXTERNAL' AND status='PENDING_REFERENCE' AND next_attempt_at <= $1 ORDER BY next_attempt_at, created_at LIMIT 1 FOR UPDATE SKIP LOCKED`, now)
+}
 func (r TransactionRepository) FindProcessedReversal(ctx context.Context, tx pgx.Tx, ref string) (domain.WagerTransaction, error) {
 	return r.getExternal(ctx, tx, `WHERE reference_transaction_id=$1 AND status='PROCESSED'`, ref)
 }
@@ -82,11 +85,14 @@ func (TransactionRepository) UpdateTerminal(ctx context.Context, tx pgx.Tx, t do
 	return (TransactionRepository{}).UpdateTerminalWithReference(ctx, tx, t, "")
 }
 func (TransactionRepository) UpdateTerminalWithReference(ctx context.Context, tx pgx.Tx, t domain.WagerTransaction, ref string) error {
+	return (TransactionRepository{}).UpdateTerminalFrom(ctx, tx, t, domain.TransactionPending, ref)
+}
+func (TransactionRepository) UpdateTerminalFrom(ctx context.Context, tx pgx.Tx, t domain.WagerTransaction, expected domain.WagerTransactionStatus, ref string) error {
 	r, ok := t.Result()
 	if !ok {
 		return errors.New("missing result")
 	}
-	tag, err := tx.Exec(ctx, `UPDATE wager_transactions SET status=$1,failure_code=$2,reference_transaction_id=NULLIF($3,''),result_balance_minor=$4,result_currency=$5,result_wallet_version=$6,updated_at=$7 WHERE id=$8 AND status='PENDING'`, t.Status(), nilIfEmpty(t.FailureCode()), ref, r.Balance.MinorUnits(), r.Balance.Currency(), r.WalletVersion, t.UpdatedAt(), t.ID())
+	tag, err := tx.Exec(ctx, `UPDATE wager_transactions SET status=$1,failure_code=$2,reference_transaction_id=NULLIF($3,''),result_balance_minor=$4,result_currency=$5,result_wallet_version=$6,next_attempt_at=NULL,updated_at=$7 WHERE id=$8 AND status=$9`, t.Status(), nilIfEmpty(t.FailureCode()), ref, r.Balance.MinorUnits(), r.Balance.Currency(), r.WalletVersion, t.UpdatedAt(), t.ID(), expected)
 	if err != nil {
 		return classify(err)
 	}

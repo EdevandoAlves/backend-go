@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/EdevandoAlves/backend-go/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -32,9 +33,11 @@ type ExternalTransactionWriter interface {
 	TryInsertExternalPending(context.Context, pgx.Tx, domain.WagerTransaction) (bool, error)
 	UpdateTerminal(context.Context, pgx.Tx, domain.WagerTransaction) error
 	UpdateTerminalWithReference(context.Context, pgx.Tx, domain.WagerTransaction, string) error
+	UpdateTerminalFrom(context.Context, pgx.Tx, domain.WagerTransaction, domain.WagerTransactionStatus, string) error
 	FindProcessedReversal(context.Context, pgx.Tx, string) (domain.WagerTransaction, error)
 	GetExternalByIdempotencyKey(context.Context, pgx.Tx, string, string) (domain.WagerTransaction, error)
 	GetExternalByExternalID(context.Context, pgx.Tx, string, string) (domain.WagerTransaction, error)
+	ClaimPendingReference(context.Context, pgx.Tx, time.Time) (domain.WagerTransaction, error)
 }
 
 type LedgerWriter interface {
