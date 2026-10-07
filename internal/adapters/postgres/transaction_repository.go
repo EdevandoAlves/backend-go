@@ -15,7 +15,7 @@ type TransactionRepository struct{}
 
 func (TransactionRepository) TryInsertExternalPending(ctx context.Context, tx pgx.Tx, t domain.WagerTransaction) (bool, error) {
 	var id string
-	err := tx.QueryRow(ctx, `INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,created_at,updated_at) VALUES ($1,'EXTERNAL',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'PENDING',$13,$13) ON CONFLICT DO NOTHING RETURNING id`, t.ID(), t.ExternalID(), t.ProviderID(), t.IdempotencyKey(), t.PayloadHash(), t.PlayerID(), t.WalletID(), t.GameID(), t.RoundID(), t.Type(), t.Amount().MinorUnits(), t.Amount().Currency(), t.CreatedAt()).Scan(&id)
+	err := tx.QueryRow(ctx, `INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,reference_external_id,created_at,updated_at) VALUES ($1,'EXTERNAL',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'PENDING',NULLIF($13,''),$14,$14) ON CONFLICT DO NOTHING RETURNING id`, t.ID(), t.ExternalID(), t.ProviderID(), t.IdempotencyKey(), t.PayloadHash(), t.PlayerID(), t.WalletID(), t.GameID(), t.RoundID(), t.Type(), t.Amount().MinorUnits(), t.Amount().Currency(), t.ReferenceExternalID(), t.CreatedAt()).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -30,6 +30,9 @@ func (r TransactionRepository) GetExternalByIdempotencyKey(ctx context.Context, 
 }
 func (r TransactionRepository) GetExternalByExternalID(ctx context.Context, tx pgx.Tx, provider, id string) (domain.WagerTransaction, error) {
 	return r.getExternal(ctx, tx, `WHERE origin='EXTERNAL' AND provider_id=$1 AND external_id=$2`, provider, id)
+}
+func (r TransactionRepository) FindProcessedReversal(ctx context.Context, tx pgx.Tx, ref string) (domain.WagerTransaction, error) {
+	return r.getExternal(ctx, tx, `WHERE reference_transaction_id=$1 AND status='PROCESSED'`, ref)
 }
 func (TransactionRepository) getExternal(ctx context.Context, tx pgx.Tx, suffix string, args ...any) (domain.WagerTransaction, error) {
 	var id, external, provider, key, hash, player, wallet, game, round, kind, currency, status string
@@ -72,15 +75,18 @@ func (TransactionRepository) getExternal(ctx context.Context, tx pgx.Tx, suffix 
 }
 
 func (TransactionRepository) InsertExternalPending(ctx context.Context, tx pgx.Tx, t domain.WagerTransaction) error {
-	_, err := tx.Exec(ctx, `INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,created_at,updated_at) VALUES ($1,'EXTERNAL',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'PENDING',$13,$13)`, t.ID(), t.ExternalID(), t.ProviderID(), t.IdempotencyKey(), t.PayloadHash(), t.PlayerID(), t.WalletID(), t.GameID(), t.RoundID(), t.Type(), t.Amount().MinorUnits(), t.Amount().Currency(), t.CreatedAt())
+	_, err := tx.Exec(ctx, `INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,reference_external_id,created_at,updated_at) VALUES ($1,'EXTERNAL',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'PENDING',NULLIF($13,''),$14,$14)`, t.ID(), t.ExternalID(), t.ProviderID(), t.IdempotencyKey(), t.PayloadHash(), t.PlayerID(), t.WalletID(), t.GameID(), t.RoundID(), t.Type(), t.Amount().MinorUnits(), t.Amount().Currency(), t.ReferenceExternalID(), t.CreatedAt())
 	return classifyApplication(err)
 }
 func (TransactionRepository) UpdateTerminal(ctx context.Context, tx pgx.Tx, t domain.WagerTransaction) error {
+	return (TransactionRepository{}).UpdateTerminalWithReference(ctx, tx, t, "")
+}
+func (TransactionRepository) UpdateTerminalWithReference(ctx context.Context, tx pgx.Tx, t domain.WagerTransaction, ref string) error {
 	r, ok := t.Result()
 	if !ok {
 		return errors.New("missing result")
 	}
-	tag, err := tx.Exec(ctx, `UPDATE wager_transactions SET status=$1,failure_code=$2,result_balance_minor=$3,result_currency=$4,result_wallet_version=$5,updated_at=$6 WHERE id=$7 AND status='PENDING'`, t.Status(), nilIfEmpty(t.FailureCode()), r.Balance.MinorUnits(), r.Balance.Currency(), r.WalletVersion, t.UpdatedAt(), t.ID())
+	tag, err := tx.Exec(ctx, `UPDATE wager_transactions SET status=$1,failure_code=$2,reference_transaction_id=NULLIF($3,''),result_balance_minor=$4,result_currency=$5,result_wallet_version=$6,updated_at=$7 WHERE id=$8 AND status='PENDING'`, t.Status(), nilIfEmpty(t.FailureCode()), ref, r.Balance.MinorUnits(), r.Balance.Currency(), r.WalletVersion, t.UpdatedAt(), t.ID())
 	if err != nil {
 		return classify(err)
 	}

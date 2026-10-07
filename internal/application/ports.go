@@ -13,6 +13,7 @@ var ErrConflict = errors.New("conflict")
 var ErrIdempotencyConflict = errors.New("idempotency conflict")
 var ErrExternalIDConflict = errors.New("external id conflict")
 var ErrNotFound = errors.New("not found")
+var ErrReferenceUnavailable = errors.New("reference unavailable")
 
 type TransactionRunner interface {
 	WithinTransaction(context.Context, func(pgx.Tx) error) error
@@ -30,6 +31,8 @@ type ExternalTransactionWriter interface {
 	InsertExternalPending(context.Context, pgx.Tx, domain.WagerTransaction) error
 	TryInsertExternalPending(context.Context, pgx.Tx, domain.WagerTransaction) (bool, error)
 	UpdateTerminal(context.Context, pgx.Tx, domain.WagerTransaction) error
+	UpdateTerminalWithReference(context.Context, pgx.Tx, domain.WagerTransaction, string) error
+	FindProcessedReversal(context.Context, pgx.Tx, string) (domain.WagerTransaction, error)
 	GetExternalByIdempotencyKey(context.Context, pgx.Tx, string, string) (domain.WagerTransaction, error)
 	GetExternalByExternalID(context.Context, pgx.Tx, string, string) (domain.WagerTransaction, error)
 }

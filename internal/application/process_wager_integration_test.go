@@ -147,6 +147,89 @@ func TestProcessWagerIntegration(t *testing.T) {
 	}
 }
 
+func TestProcessWagerRefundProcessedBet(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" || !strings.Contains(url, "_test") {
+		t.Fatal("TEST_DATABASE_URL must target a _test database")
+	}
+	root, _ := filepath.Abs("../../")
+	ctx := context.Background()
+	p, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	_, _ = p.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
+	for _, name := range []string{"000001_schema.up.sql", "000002_wager_currency.up.sql", "000003_pending_reference.up.sql"} {
+		b, e := os.ReadFile(filepath.Join(root, "migrations", name))
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = p.Exec(ctx, string(b)); e != nil {
+			t.Fatal(e)
+		}
+	}
+	pool, err := postgres.NewPool(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	s := application.ProcessWagerService{Manager: postgres.NewTxManager(pool), Wallet: postgres.WalletRepository{}, Transactions: postgres.TransactionRepository{}, Ledger: postgres.LedgerRepository{}, Outbox: postgres.OutboxRepository{}}
+	seed(t, p)
+	bet := command("refund-bet", domain.TransactionBet, money(t, "25.00"))
+	if err = s.Execute(ctx, bet); err != nil {
+		t.Fatal(err)
+	}
+	refund := command("refund", domain.TransactionRefund, money(t, "25.00"))
+	refund.ExternalID, refund.IdempotencyKey, refund.ReferenceExternalID = "refund-ext", "refund-key", bet.ExternalID
+	if err = s.Execute(ctx, refund); err != nil {
+		t.Fatal(err)
+	}
+	var balance int64
+	var status, refID string
+	var version int64
+	if err = p.QueryRow(ctx, "SELECT balance_minor,version FROM wallets WHERE id='wallet'").Scan(&balance, &version); err != nil {
+		t.Fatal(err)
+	}
+	if balance != 10000 || version != 3 {
+		t.Fatalf("wallet=%d version=%d", balance, version)
+	}
+	if err = p.QueryRow(ctx, "SELECT status,reference_transaction_id FROM wager_transactions WHERE id='refund'").Scan(&status, &refID); err != nil || status != "PROCESSED" || refID == "" {
+		t.Fatalf("refund=%s ref=%s err=%v", status, refID, err)
+	}
+	var direction string
+	var before, after, amount int64
+	if err = p.QueryRow(ctx, "SELECT direction,amount_minor,before_minor,after_minor FROM wallet_ledger_entries WHERE transaction_id='refund'").Scan(&direction, &amount, &before, &after); err != nil {
+		t.Fatal(err)
+	}
+	if direction != "CREDIT" || amount != 2500 || before != 7500 || after != 10000 {
+		t.Fatalf("ledger=%s amount=%d before=%d after=%d", direction, amount, before, after)
+	}
+	var events int
+	if err = p.QueryRow(ctx, "SELECT count(*) FROM outbox_events WHERE transaction_id='refund'").Scan(&events); err != nil || events != 2 {
+		t.Fatalf("events=%d err=%v", events, err)
+	}
+	bad := command("refund-bad", domain.TransactionRefund, money(t, "24.00"))
+	bad.ExternalID, bad.IdempotencyKey, bad.ReferenceExternalID = "refund-bad-ext", "refund-bad-key", bet.ExternalID
+	if err = s.Execute(ctx, bad); err != nil {
+		t.Fatal(err)
+	}
+	var failure string
+	if err = p.QueryRow(ctx, "SELECT status,failure_code FROM wager_transactions WHERE id='refund-bad'").Scan(&status, &failure); err != nil || status != "REJECTED" || failure != "REFERENCE_MISMATCH" {
+		t.Fatalf("bad=%s/%s err=%v", status, failure, err)
+	}
+	if err = p.QueryRow(ctx, "SELECT reference_transaction_id FROM wager_transactions WHERE id='refund-bad'").Scan(&refID); err != nil || refID != bet.ID {
+		t.Fatalf("bad reference=%s err=%v", refID, err)
+	}
+	if err = p.QueryRow(ctx, "SELECT balance_minor FROM wallets WHERE id='wallet'").Scan(&balance); err != nil || balance != 10000 {
+		t.Fatalf("balance after mismatch=%d err=%v", balance, err)
+	}
+	var badLedger int
+	if err = p.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE transaction_id='refund-bad'").Scan(&badLedger); err != nil || badLedger != 0 {
+		t.Fatalf("mismatch ledger=%d err=%v", badLedger, err)
+	}
+}
+
 func TestProcessWagerConcurrentBets(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" || !strings.Contains(url, "_test") {
