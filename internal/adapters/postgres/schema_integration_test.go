@@ -35,6 +35,14 @@ func TestMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	up3, err := os.ReadFile(filepath.Join(root, "migrations", "000003_pending_reference.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	down3, err := os.ReadFile(filepath.Join(root, "migrations", "000003_pending_reference.down.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	down2, err := os.ReadFile(filepath.Join(root, "migrations", "000002_wager_currency.down.sql"))
 	if err != nil {
 		t.Fatal(err)
@@ -43,8 +51,8 @@ func TestMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	up := string(up1) + "\n" + string(up2)
-	down := string(down2) + "\n" + string(down1)
+	up := string(up1) + "\n" + string(up2) + "\n" + string(up3)
+	down := string(down3) + "\n" + string(down2) + "\n" + string(down1)
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
@@ -204,7 +212,7 @@ func testConstraints(t *testing.T, conn *pgx.Conn) {
 	mustFail("ledger delete", "55000", "DELETE FROM wallet_ledger_entries WHERE id='led'")
 
 	mustFail("identity update", "55000", "UPDATE wager_transactions SET external_id='changed' WHERE id='l1'")
-	mustFail("reference fill from pending", "55000", "UPDATE wager_transactions SET reference_transaction_id='l6',status='PROCESSED',result_balance_minor=1,result_currency='BRL',result_wallet_version=2,next_attempt_at=NULL WHERE id='l7'")
+	mustFail("reference on non-reversal", "23514", "UPDATE wager_transactions SET reference_transaction_id='l6',status='PROCESSED',result_balance_minor=1,result_currency='BRL',result_wallet_version=2,next_attempt_at=NULL WHERE id='l7'")
 	mustFail("reference change after terminal", "55000", "UPDATE wager_transactions SET reference_transaction_id='l6' WHERE id='l8'")
 	mustFail("terminal update", "55000", "UPDATE wager_transactions SET amount_minor=1 WHERE id='o1'")
 
