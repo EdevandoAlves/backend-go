@@ -36,11 +36,11 @@ func (s ReconcileReferenceService) ReconcileOne(ctx context.Context, now time.Ti
 			return err
 		}
 		claimed = true
-		if pending.Type() != domain.TransactionRefund {
+		if pending.Type() != domain.TransactionRefund && pending.Type() != domain.TransactionRollback {
 			return nil
 		}
 		ref, err := s.Transactions.GetExternalByExternalID(ctx, tx, pending.ProviderID(), pending.ReferenceExternalID())
-		if err != nil || ref.Status() != domain.TransactionProcessed || ref.Type() != domain.TransactionBet || ref.PlayerID() != pending.PlayerID() || ref.WalletID() != pending.WalletID() || ref.Amount().MinorUnits() != pending.Amount().MinorUnits() || ref.Amount().Currency() != pending.Amount().Currency() || ref.RoundID() != pending.RoundID() {
+		if err != nil {
 			if pending.AttemptCount() >= 9 {
 				w, e := s.Wallet.GetForUpdate(ctx, tx, pending.WalletID())
 				if e != nil {
@@ -63,13 +63,62 @@ func (s ReconcileReferenceService) ReconcileOne(ctx context.Context, now time.Ti
 			}
 			return s.Transactions.ReschedulePendingReference(ctx, tx, pending, now.Add(delay))
 		}
+		matches := ref.Status() == domain.TransactionProcessed && ref.PlayerID() == pending.PlayerID() && ref.WalletID() == pending.WalletID() && ref.Amount().MinorUnits() == pending.Amount().MinorUnits() && ref.Amount().Currency() == pending.Amount().Currency() && ref.RoundID() == pending.RoundID()
+		failure := ""
+		if pending.Type() == domain.TransactionRefund && ref.Type() != domain.TransactionBet {
+			matches = false
+		}
+		if pending.Type() == domain.TransactionRollback {
+			switch ref.Type() {
+			case domain.TransactionBet, domain.TransactionWin, domain.TransactionRefund:
+			default:
+				matches = false
+			}
+		}
 		w, err := s.Wallet.GetForUpdate(ctx, tx, pending.WalletID())
 		if err != nil {
 			return err
 		}
 		before := w.Balance()
-		if err = w.Credit(pending.Amount(), now); err != nil {
+		if !matches {
+			failure = "REFERENCE_MISMATCH"
+		}
+		if matches && pending.Type() == domain.TransactionRollback && (ref.Type() == domain.TransactionWin || ref.Type() == domain.TransactionRefund) {
+			if err = w.Debit(pending.Amount(), now); err != nil {
+				failure = "INSUFFICIENT_FUNDS"
+			}
+		} else if matches {
+			err = w.Credit(pending.Amount(), now)
+		}
+		if failure != "" {
+			result := domain.WagerTransactionResult{Balance: before, WalletVersion: w.Version()}
+			terminal, e := rehydrateReferenceTerminal(pending, domain.TransactionRejected, failure, result, now, ref.ID())
+			if e != nil {
+				return e
+			}
+			if e = s.Transactions.UpdateTerminalFrom(ctx, tx, terminal, domain.TransactionPendingReference, ref.ID()); e != nil {
+				return e
+			}
+			payload, _ := json.Marshal(map[string]any{"transactionId": pending.ID(), "walletId": w.ID(), "state": "REJECTED", "operationType": string(pending.Type()), "failureCode": failure, "resultingBalance": map[string]string{"amount": formatMoney(before), "currency": before.Currency()}})
+			return s.Outbox.Insert(ctx, tx, OutboxEvent{ID: pending.ID() + ":rejected", AggregateID: w.ID(), TransactionID: pending.ID(), EventType: "WagerTransactionRejected", CorrelationID: pending.ID(), EventVersion: 1, Payload: payload})
+		}
+		if err != nil {
 			return err
+		}
+		if pending.Type() == domain.TransactionRollback {
+			if existing, e := s.Transactions.FindProcessedReversal(ctx, tx, ref.ID()); e == nil {
+				_ = existing
+				result := domain.WagerTransactionResult{Balance: before, WalletVersion: w.Version()}
+				terminal, e := rehydrateReferenceTerminal(pending, domain.TransactionRejected, "REFERENCE_ALREADY_REVERSED", result, now, ref.ID())
+				if e != nil {
+					return e
+				}
+				if e = s.Transactions.UpdateTerminalFrom(ctx, tx, terminal, domain.TransactionPendingReference, ref.ID()); e != nil {
+					return e
+				}
+				payload, _ := json.Marshal(map[string]any{"transactionId": pending.ID(), "walletId": w.ID(), "state": "REJECTED", "operationType": string(pending.Type()), "failureCode": "REFERENCE_ALREADY_REVERSED", "resultingBalance": map[string]string{"amount": formatMoney(before), "currency": before.Currency()}})
+				return s.Outbox.Insert(ctx, tx, OutboxEvent{ID: pending.ID() + ":rejected", AggregateID: w.ID(), TransactionID: pending.ID(), EventType: "WagerTransactionRejected", CorrelationID: pending.ID(), EventVersion: 1, Payload: payload})
+			}
 		}
 		if err = s.Wallet.Save(ctx, tx, w, w.Version()-1); err != nil {
 			return err
@@ -80,14 +129,20 @@ func (s ReconcileReferenceService) ReconcileOne(ctx context.Context, now time.Ti
 			}
 		}
 		result := domain.WagerTransactionResult{Balance: w.Balance(), WalletVersion: w.Version()}
-		terminal, err := domain.RehydrateExternalWagerTransaction(domain.RehydratedWagerTransaction{WagerTransactionInput: domain.WagerTransactionInput{ID: pending.ID(), ExternalID: pending.ExternalID(), ProviderID: pending.ProviderID(), PlayerID: pending.PlayerID(), WalletID: pending.WalletID(), IdempotencyKey: pending.IdempotencyKey(), PayloadHash: pending.PayloadHash(), GameID: pending.GameID(), RoundID: pending.RoundID(), Kind: pending.Type(), Amount: pending.Amount(), ReferenceExternalID: pending.ReferenceExternalID()}, Status: domain.TransactionProcessed, ReferenceTransactionID: ref.ID(), Result: &result, CreatedAt: pending.CreatedAt(), UpdatedAt: now})
+		terminal, err := rehydrateReferenceTerminal(pending, domain.TransactionProcessed, "", result, now, ref.ID())
 		if err != nil {
 			return err
 		}
 		if err = s.Transactions.UpdateTerminalFrom(ctx, tx, terminal, domain.TransactionPendingReference, ref.ID()); err != nil {
 			return err
 		}
-		entry, err := domain.NewWalletLedgerEntry(ids.LedgerID, w.ID(), pending.ID(), domain.LedgerCredit, pending.Amount(), before, w.Balance(), now)
+		direction := domain.LedgerCredit
+		directionName := "CREDIT"
+		if pending.Type() == domain.TransactionRollback && (ref.Type() == domain.TransactionWin || ref.Type() == domain.TransactionRefund) {
+			direction = domain.LedgerDebit
+			directionName = "DEBIT"
+		}
+		entry, err := domain.NewWalletLedgerEntry(ids.LedgerID, w.ID(), pending.ID(), direction, pending.Amount(), before, w.Balance(), now)
 		if err != nil {
 			return err
 		}
@@ -106,10 +161,14 @@ func (s ReconcileReferenceService) ReconcileOne(ctx context.Context, now time.Ti
 		if err = s.Outbox.Insert(ctx, tx, OutboxEvent{ID: ids.ProcessedEventID, AggregateID: w.ID(), TransactionID: pending.ID(), EventType: "WagerTransactionProcessed", CorrelationID: pending.ID(), EventVersion: 1, Payload: processed}); err != nil {
 			return err
 		}
-		balance, _ := json.Marshal(map[string]any{"walletId": w.ID(), "transactionId": pending.ID(), "direction": "CREDIT", "money": money(pending.Amount()), "balanceBefore": money(before), "balanceAfter": money(w.Balance()), "walletVersion": w.Version()})
+		balance, _ := json.Marshal(map[string]any{"walletId": w.ID(), "transactionId": pending.ID(), "direction": directionName, "money": money(pending.Amount()), "balanceBefore": money(before), "balanceAfter": money(w.Balance()), "walletVersion": w.Version()})
 		return s.Outbox.Insert(ctx, tx, OutboxEvent{ID: ids.BalanceEventID, AggregateID: w.ID(), TransactionID: pending.ID(), EventType: "WalletBalanceChanged", CorrelationID: pending.ID(), EventVersion: 1, Payload: balance})
 	})
 	return claimed, err
+}
+
+func rehydrateReferenceTerminal(t domain.WagerTransaction, status domain.WagerTransactionStatus, failure string, result domain.WagerTransactionResult, now time.Time, ref string) (domain.WagerTransaction, error) {
+	return domain.RehydrateExternalWagerTransaction(domain.RehydratedWagerTransaction{WagerTransactionInput: domain.WagerTransactionInput{ID: t.ID(), ExternalID: t.ExternalID(), ProviderID: t.ProviderID(), PlayerID: t.PlayerID(), WalletID: t.WalletID(), IdempotencyKey: t.IdempotencyKey(), PayloadHash: t.PayloadHash(), GameID: t.GameID(), RoundID: t.RoundID(), Kind: t.Type(), Amount: t.Amount(), ReferenceExternalID: t.ReferenceExternalID()}, Status: status, FailureCode: failure, ReferenceTransactionID: ref, Result: &result, CreatedAt: t.CreatedAt(), UpdatedAt: now})
 }
 
 func formatMoney(m domain.Money) string {

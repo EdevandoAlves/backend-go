@@ -159,6 +159,43 @@ func TestReconcileReferenceIntegration(t *testing.T) {
 	}
 }
 
+func TestReconcileReferenceRollbackWinUsesDebitDirection(t *testing.T) {
+	conn, url, now := setupReconcileDatabase(t, "rollback-win")
+	ctx := context.Background()
+	if _, err := conn.Exec(ctx, "DELETE FROM wager_transactions WHERE id='rollback-win-refund'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, "UPDATE wallets SET balance_minor=10000, version=3 WHERE id='rollback-win-wallet'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,result_balance_minor,result_currency,result_wallet_version) VALUES ('rollback-win-reference','EXTERNAL','win-later','rollback-win-provider','win-key',$1,'rollback-win-player','rollback-win-wallet','game','round','WIN',2500,'BRL','PROCESSED',10000,'BRL',3)`, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,reference_external_id,attempt_count,next_attempt_at) VALUES ('rollback-win','EXTERNAL','rollback-win','rollback-win-provider','rollback-key',$1,'rollback-win-player','rollback-win-wallet','game','round','ROLLBACK',2500,'BRL','PENDING_REFERENCE','win-later',0,$2)`, strings.Repeat("b", 64), now); err != nil {
+		t.Fatal(err)
+	}
+	p := reconcileService(t, ctx, url)
+	defer p.Close()
+	if worked, err := reconcileApp(p).ReconcileOne(ctx, now, application.ReconcileReferenceIDs{ProcessedEventID: "rollback-win:processed", BalanceEventID: "rollback-win:balance", LedgerID: "rollback-win:ledger"}); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	var balance int
+	if err := conn.QueryRow(ctx, "SELECT balance_minor FROM wallets WHERE id='rollback-win-wallet'").Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if balance != 7500 {
+		t.Fatalf("balance=%d", balance)
+	}
+	var direction string
+	if err := conn.QueryRow(ctx, "SELECT direction FROM wallet_ledger_entries WHERE transaction_id='rollback-win'").Scan(&direction); err != nil || direction != "DEBIT" {
+		t.Fatalf("direction=%s err=%v", direction, err)
+	}
+	var eventDirection string
+	if err := conn.QueryRow(ctx, "SELECT payload->>'direction' FROM outbox_events WHERE id='rollback-win:balance'").Scan(&eventDirection); err != nil || eventDirection != "DEBIT" {
+		t.Fatalf("event direction=%s err=%v", eventDirection, err)
+	}
+}
+
 func TestReconcileReferenceRetryExhaustion(t *testing.T) {
 	url := "postgres://postgres:postgres@localhost:5432/s25_server_integration_test?sslmode=disable"
 	ctx := context.Background()
