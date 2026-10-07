@@ -76,11 +76,24 @@ func CanonicalWagerHash(c ProcessWagerCommand) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
 }
+
+type ProcessWagerResult struct {
+	Status        domain.WagerTransactionStatus
+	FailureCode   string
+	Balance       domain.Money
+	WalletVersion int64
+}
+
 func (s ProcessWagerService) Execute(ctx context.Context, c ProcessWagerCommand) error {
+	_, err := s.ExecuteResult(ctx, c)
+	return err
+}
+func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCommand) (ProcessWagerResult, error) {
 	if c.ID == "" || c.ProviderID == "" || c.ExternalID == "" || c.IdempotencyKey == "" || c.PlayerID == "" || c.WalletID == "" || c.GameID == "" || c.RoundID == "" || c.Now.IsZero() || (c.Kind != domain.TransactionBet && c.Kind != domain.TransactionWin && c.Kind != domain.TransactionLoss) {
-		return domain.ErrInvalidTransaction
+		return ProcessWagerResult{}, domain.ErrInvalidTransaction
 	}
-	return s.Manager.WithinTransaction(ctx, func(tx pgx.Tx) error {
+	var result ProcessWagerResult
+	err := s.Manager.WithinTransaction(ctx, func(tx pgx.Tx) error {
 		w, e := s.Wallet.GetForUpdate(ctx, tx, c.WalletID)
 		if e != nil {
 			if s.IsNotFound != nil && s.IsNotFound(e) {
@@ -111,6 +124,7 @@ func (s ProcessWagerService) Execute(ctx context.Context, c ProcessWagerCommand)
 			if e = s.Transactions.UpdateTerminal(ctx, tx, t); e != nil {
 				return e
 			}
+			result = ProcessWagerResult{Status: t.Status(), FailureCode: t.FailureCode(), Balance: r.Balance, WalletVersion: r.WalletVersion}
 			return s.insertRejected(ctx, tx, c, t, r)
 		}
 		before := w.Balance()
@@ -123,6 +137,7 @@ func (s ProcessWagerService) Execute(ctx context.Context, c ProcessWagerCommand)
 				if e = s.Transactions.UpdateTerminal(ctx, tx, t); e != nil {
 					return e
 				}
+				result = ProcessWagerResult{Status: t.Status(), FailureCode: t.FailureCode(), Balance: r.Balance, WalletVersion: r.WalletVersion}
 				return s.insertRejected(ctx, tx, c, t, r)
 			}
 			changed = true
@@ -177,8 +192,10 @@ func (s ProcessWagerService) Execute(ctx context.Context, c ProcessWagerCommand)
 				return e
 			}
 		}
+		result = ProcessWagerResult{Status: t.Status(), FailureCode: t.FailureCode(), Balance: w.Balance(), WalletVersion: w.Version()}
 		return nil
 	})
+	return result, err
 }
 
 func (s ProcessWagerService) insertRejected(ctx context.Context, tx pgx.Tx, c ProcessWagerCommand, t domain.WagerTransaction, result domain.WagerTransactionResult) error {
