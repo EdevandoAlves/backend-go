@@ -106,7 +106,7 @@ func (s ProcessWagerService) Execute(ctx context.Context, c ProcessWagerCommand)
 	return err
 }
 func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCommand) (ProcessWagerResult, error) {
-	if c.ID == "" || c.ProviderID == "" || c.ExternalID == "" || c.IdempotencyKey == "" || c.PlayerID == "" || c.WalletID == "" || c.GameID == "" || c.RoundID == "" || c.Now.IsZero() || (c.Kind != domain.TransactionBet && c.Kind != domain.TransactionWin && c.Kind != domain.TransactionLoss && c.Kind != domain.TransactionRefund) {
+	if c.ID == "" || c.ProviderID == "" || c.ExternalID == "" || c.IdempotencyKey == "" || c.PlayerID == "" || c.WalletID == "" || c.GameID == "" || c.RoundID == "" || c.Now.IsZero() || (c.Kind != domain.TransactionBet && c.Kind != domain.TransactionWin && c.Kind != domain.TransactionLoss && c.Kind != domain.TransactionRefund && c.Kind != domain.TransactionRollback) {
 		return ProcessWagerResult{}, domain.ErrInvalidTransaction
 	}
 	hash, err := CanonicalWagerHash(c)
@@ -165,13 +165,30 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 		}
 		r := domain.WagerTransactionResult{Balance: w.Balance(), WalletVersion: w.Version()}
 		referenceID := ""
-		if c.Kind == domain.TransactionRefund {
+		movement := c.Kind
+		if c.Kind == domain.TransactionRefund || c.Kind == domain.TransactionRollback {
 			ref, re := s.Transactions.GetExternalByExternalID(ctx, tx, c.ProviderID, c.ReferenceExternalID)
-			if re != nil || ref.Status() != domain.TransactionProcessed || ref.Type() != domain.TransactionBet {
+			if re != nil || ref.Status() != domain.TransactionProcessed {
 				return ErrReferenceUnavailable
 			}
 			referenceID = ref.ID()
-			valid := ref.PlayerID() == c.PlayerID && ref.WalletID() == c.WalletID && ref.Amount().Currency() == c.Amount.Currency() && ref.GameID() == c.GameID && ref.RoundID() == c.RoundID && ref.Amount().MinorUnits() == c.Amount.MinorUnits()
+			if _, re = s.Transactions.FindProcessedReversal(ctx, tx, referenceID); re == nil {
+				if e = t.Reject("REFERENCE_ALREADY_REVERSED", r, c.Now); e != nil {
+					return e
+				}
+				if e = s.Transactions.UpdateTerminalWithReference(ctx, tx, t, referenceID); e != nil {
+					return e
+				}
+				result = ProcessWagerResult{TransactionID: t.ID(), ExternalID: t.ExternalID(), Status: t.Status(), FailureCode: t.FailureCode(), Balance: r.Balance}
+				return s.insertRejected(ctx, tx, c, t, r)
+			}
+			if c.Kind == domain.TransactionRollback && (ref.Type() == domain.TransactionLoss || ref.Type() == domain.TransactionRollback) {
+				return domain.ErrInvalidTransaction
+			}
+			if c.Kind == domain.TransactionRollback && ref.Type() != domain.TransactionBet && ref.Type() != domain.TransactionWin && ref.Type() != domain.TransactionRefund {
+				return domain.ErrInvalidTransaction
+			}
+			valid := ref.PlayerID() == c.PlayerID && ref.WalletID() == c.WalletID && ref.Amount().Currency() == c.Amount.Currency() && ref.RoundID() == c.RoundID && ref.Amount().MinorUnits() == c.Amount.MinorUnits()
 			if !valid {
 				if e = t.Reject("REFERENCE_MISMATCH", r, c.Now); e != nil {
 					return e
@@ -182,12 +199,17 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 				result = ProcessWagerResult{TransactionID: t.ID(), ExternalID: t.ExternalID(), Status: t.Status(), FailureCode: t.FailureCode(), Balance: r.Balance, WalletVersion: r.WalletVersion}
 				return s.insertRejected(ctx, tx, c, t, r)
 			}
+			if c.Kind == domain.TransactionRefund || ref.Type() == domain.TransactionBet {
+				movement = domain.TransactionWin
+			} else {
+				movement = domain.TransactionBet
+			}
 		}
 		if c.Amount.Currency() != w.Currency() {
 			if e = t.Reject("CURRENCY_MISMATCH", r, c.Now); e != nil {
 				return e
 			}
-			if e = s.Transactions.UpdateTerminal(ctx, tx, t); e != nil {
+			if e = s.Transactions.UpdateTerminalWithReference(ctx, tx, t, referenceID); e != nil {
 				return e
 			}
 			result = ProcessWagerResult{TransactionID: t.ID(), ExternalID: t.ExternalID(), Status: t.Status(), FailureCode: t.FailureCode(), Balance: r.Balance, WalletVersion: r.WalletVersion, CreatedAt: t.CreatedAt(), ProcessedAt: t.UpdatedAt()}
@@ -195,19 +217,19 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 		}
 		before := w.Balance()
 		changed := false
-		if c.Kind == domain.TransactionBet {
+		if movement == domain.TransactionBet {
 			if e = w.Debit(c.Amount, c.Now); e != nil {
 				if e = t.Reject("INSUFFICIENT_FUNDS", r, c.Now); e != nil {
 					return e
 				}
-				if e = s.Transactions.UpdateTerminal(ctx, tx, t); e != nil {
+				if e = s.Transactions.UpdateTerminalWithReference(ctx, tx, t, referenceID); e != nil {
 					return e
 				}
 				result = ProcessWagerResult{TransactionID: t.ID(), ExternalID: t.ExternalID(), Status: t.Status(), FailureCode: t.FailureCode(), Balance: r.Balance, WalletVersion: r.WalletVersion, CreatedAt: t.CreatedAt(), ProcessedAt: t.UpdatedAt()}
 				return s.insertRejected(ctx, tx, c, t, r)
 			}
 			changed = true
-		} else if c.Kind == domain.TransactionWin || c.Kind == domain.TransactionRefund {
+		} else if movement == domain.TransactionWin {
 			if e = w.Credit(c.Amount, c.Now); e != nil {
 				return e
 			}
@@ -223,7 +245,7 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 				}
 			}
 			dir := domain.LedgerCredit
-			if c.Kind == domain.TransactionBet {
+			if movement == domain.TransactionBet {
 				dir = domain.LedgerDebit
 			}
 			le, e := domain.NewWalletLedgerEntry(c.TransactionID, c.WalletID, c.ID, dir, c.Amount, before, w.Balance(), c.Now)

@@ -147,6 +147,126 @@ func TestProcessWagerIntegration(t *testing.T) {
 	}
 }
 
+func TestProcessWagerRollbackMatrix(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  domain.WagerTransactionType
+		wantDir string
+	}{
+		{"bet", domain.TransactionBet, "CREDIT"},
+		{"win", domain.TransactionWin, "DEBIT"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool, url := integrationDatabase(t)
+			defer pool.Close()
+			p, err := postgres.NewPool(ctx, url)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			s := application.ProcessWagerService{Manager: postgres.NewTxManager(p), Wallet: postgres.WalletRepository{}, Transactions: postgres.TransactionRepository{}, Ledger: postgres.LedgerRepository{}, Outbox: postgres.OutboxRepository{}}
+			seed(t, pool)
+			source := command("rollback-source-"+tc.name, tc.source, money(t, "25.00"))
+			if err = s.Execute(ctx, source); err != nil {
+				t.Fatal(err)
+			}
+			rb := command("rollback-result-"+tc.name, domain.TransactionRollback, money(t, "25.00"))
+			rb.ExternalID, rb.IdempotencyKey, rb.ReferenceExternalID = rb.ID+"-ext", rb.ID+"-key", source.ExternalID
+			if err = s.Execute(ctx, rb); err != nil {
+				t.Fatal(err)
+			}
+			var status, ref, direction string
+			if err = pool.QueryRow(ctx, "SELECT status,reference_transaction_id FROM wager_transactions WHERE id=$1", rb.ID).Scan(&status, &ref); err != nil {
+				t.Fatal(err)
+			}
+			if status != "PROCESSED" || ref != source.ID {
+				t.Fatalf("status=%s ref=%s", status, ref)
+			}
+			if err = pool.QueryRow(ctx, "SELECT direction FROM wallet_ledger_entries WHERE transaction_id=$1", rb.ID).Scan(&direction); err != nil || direction != tc.wantDir {
+				t.Fatalf("direction=%s err=%v", direction, err)
+			}
+		})
+	}
+	t.Run("refund", func(t *testing.T) {
+		ctx, pool, url := integrationDatabase(t)
+		defer pool.Close()
+		p, err := postgres.NewPool(ctx, url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.Close()
+		s := application.ProcessWagerService{Manager: postgres.NewTxManager(p), Wallet: postgres.WalletRepository{}, Transactions: postgres.TransactionRepository{}, Ledger: postgres.LedgerRepository{}, Outbox: postgres.OutboxRepository{}}
+		seed(t, pool)
+		bet := command("rollback-refund-bet", domain.TransactionBet, money(t, "25.00"))
+		if err = s.Execute(ctx, bet); err != nil {
+			t.Fatal(err)
+		}
+		refund := command("rollback-refund-source", domain.TransactionRefund, money(t, "25.00"))
+		refund.ExternalID, refund.IdempotencyKey, refund.ReferenceExternalID = "rollback-refund-source-ext", "rollback-refund-source-key", bet.ExternalID
+		if err = s.Execute(ctx, refund); err != nil {
+			t.Fatal(err)
+		}
+		rb := command("rollback-refund-result", domain.TransactionRollback, money(t, "25.00"))
+		rb.ExternalID, rb.IdempotencyKey, rb.ReferenceExternalID = "rollback-refund-result-ext", "rollback-refund-result-key", refund.ExternalID
+		if err = s.Execute(ctx, rb); err != nil {
+			t.Fatal(err)
+		}
+		var status, ref, direction string
+		if err = pool.QueryRow(ctx, "SELECT status,reference_transaction_id FROM wager_transactions WHERE id=$1", rb.ID).Scan(&status, &ref); err != nil || status != "PROCESSED" || ref != refund.ID {
+			t.Fatalf("status=%s ref=%s err=%v", status, ref, err)
+		}
+		if err = pool.QueryRow(ctx, "SELECT direction FROM wallet_ledger_entries WHERE transaction_id=$1", rb.ID).Scan(&direction); err != nil || direction != "DEBIT" {
+			t.Fatalf("direction=%s err=%v", direction, err)
+		}
+	})
+	t.Run("insufficient-and-duplicate", func(t *testing.T) {
+		ctx, pool, url := integrationDatabase(t)
+		defer pool.Close()
+		p, err := postgres.NewPool(ctx, url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer p.Close()
+		s := application.ProcessWagerService{Manager: postgres.NewTxManager(p), Wallet: postgres.WalletRepository{}, Transactions: postgres.TransactionRepository{}, Ledger: postgres.LedgerRepository{}, Outbox: postgres.OutboxRepository{}}
+		seed(t, pool)
+		win := command("rollback-insufficient-win", domain.TransactionWin, money(t, "25.00"))
+		if err = s.Execute(ctx, win); err != nil {
+			t.Fatal(err)
+		}
+		spend := command("rollback-insufficient-spend", domain.TransactionBet, money(t, "125.00"))
+		if err = s.Execute(ctx, spend); err != nil {
+			t.Fatal(err)
+		}
+		rb := command("rollback-insufficient-result", domain.TransactionRollback, money(t, "25.00"))
+		rb.ExternalID, rb.IdempotencyKey, rb.ReferenceExternalID = "rollback-insufficient-ext", "rollback-insufficient-key", win.ExternalID
+		if err = s.Execute(ctx, rb); err != nil {
+			t.Fatal(err)
+		}
+		var status, failure, ref string
+		if err = pool.QueryRow(ctx, "SELECT status,failure_code,reference_transaction_id FROM wager_transactions WHERE id=$1", rb.ID).Scan(&status, &failure, &ref); err != nil || status != "REJECTED" || failure != "INSUFFICIENT_FUNDS" || ref != win.ID {
+			t.Fatalf("status=%s failure=%s ref=%s err=%v", status, failure, ref, err)
+		}
+		win2 := command("rollback-duplicate-win", domain.TransactionWin, money(t, "25.00"))
+		if err = s.Execute(ctx, win2); err != nil {
+			t.Fatal(err)
+		}
+		first := command("rollback-duplicate-first", domain.TransactionRollback, money(t, "25.00"))
+		first.ExternalID, first.IdempotencyKey, first.ReferenceExternalID = "rollback-duplicate-first-ext", "rollback-duplicate-first-key", win2.ExternalID
+		if err = s.Execute(ctx, first); err != nil {
+			t.Fatal(err)
+		}
+		second := command("rollback-duplicate-result", domain.TransactionRollback, money(t, "25.00"))
+		second.ExternalID, second.IdempotencyKey, second.ReferenceExternalID = "rollback-duplicate-ext", "rollback-duplicate-key", win2.ExternalID
+		if err = s.Execute(ctx, second); err != nil {
+			t.Fatal(err)
+		}
+		if err = pool.QueryRow(ctx, "SELECT status,failure_code,reference_transaction_id FROM wager_transactions WHERE id=$1", second.ID).Scan(&status, &failure, &ref); err != nil || status != "REJECTED" || failure != "REFERENCE_ALREADY_REVERSED" || ref != win2.ID {
+			t.Fatalf("duplicate status=%s failure=%s ref=%s err=%v", status, failure, ref, err)
+		}
+	})
+}
+
 func TestProcessWagerRefundProcessedBet(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" || !strings.Contains(url, "_test") {
@@ -215,7 +335,7 @@ func TestProcessWagerRefundProcessedBet(t *testing.T) {
 		t.Fatal(err)
 	}
 	var failure string
-	if err = p.QueryRow(ctx, "SELECT status,failure_code FROM wager_transactions WHERE id='refund-bad'").Scan(&status, &failure); err != nil || status != "REJECTED" || failure != "REFERENCE_MISMATCH" {
+	if err = p.QueryRow(ctx, "SELECT status,failure_code FROM wager_transactions WHERE id='refund-bad'").Scan(&status, &failure); err != nil || status != "REJECTED" || failure != "REFERENCE_ALREADY_REVERSED" {
 		t.Fatalf("bad=%s/%s err=%v", status, failure, err)
 	}
 	if err = p.QueryRow(ctx, "SELECT reference_transaction_id FROM wager_transactions WHERE id='refund-bad'").Scan(&refID); err != nil || refID != bet.ID {
@@ -485,6 +605,10 @@ func integrationDatabase(t *testing.T) (context.Context, *pgxpool.Pool, string) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	up3, err := os.ReadFile(filepath.Join(root, "migrations/000003_pending_reference.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	down1, err := os.ReadFile(filepath.Join(root, "migrations/000001_schema.down.sql"))
 	if err != nil {
 		t.Fatal(err)
@@ -498,7 +622,7 @@ func integrationDatabase(t *testing.T) (context.Context, *pgxpool.Pool, string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"+string(up1)+string(up2)); err != nil {
+	if _, err = pool.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"+string(up1)+string(up2)+string(up3)); err != nil {
 		pool.Close()
 		t.Fatal(err)
 	}
