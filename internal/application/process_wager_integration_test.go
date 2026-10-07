@@ -25,14 +25,12 @@ func TestProcessWagerIntegration(t *testing.T) {
 	root, _ := filepath.Abs("../../")
 	up1, _ := os.ReadFile(filepath.Join(root, "migrations/000001_schema.up.sql"))
 	up2, _ := os.ReadFile(filepath.Join(root, "migrations/000002_wager_currency.up.sql"))
-	down1, _ := os.ReadFile(filepath.Join(root, "migrations/000001_schema.down.sql"))
-	down2, _ := os.ReadFile(filepath.Join(root, "migrations/000002_wager_currency.down.sql"))
 	ctx := context.Background()
 	pool, e := pgxpool.New(ctx, url)
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer pool.Close()
+	// The schema is dropped only after this pool and the application pool close.
 	reset := func() {
 		_, _ = pool.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
 		if _, e := pool.Exec(ctx, string(up1)+string(up2)); e != nil {
@@ -40,7 +38,14 @@ func TestProcessWagerIntegration(t *testing.T) {
 		}
 	}
 	reset()
-	defer pool.Exec(ctx, string(down2)+string(down1))
+	defer func() {
+		pool.Close()
+		cleanup, e := pgxpool.New(ctx, url)
+		if e == nil {
+			_, _ = cleanup.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
+			cleanup.Close()
+		}
+	}()
 	p, e := postgres.NewPool(ctx, url)
 	if e != nil {
 		t.Fatal(e)

@@ -40,7 +40,27 @@ func (s ReconcileReferenceService) ReconcileOne(ctx context.Context, now time.Ti
 		}
 		ref, err := s.Transactions.GetExternalByExternalID(ctx, tx, pending.ProviderID(), pending.ReferenceExternalID())
 		if err != nil || ref.Status() != domain.TransactionProcessed || ref.Type() != domain.TransactionBet || ref.PlayerID() != pending.PlayerID() || ref.WalletID() != pending.WalletID() || ref.Amount().MinorUnits() != pending.Amount().MinorUnits() || ref.Amount().Currency() != pending.Amount().Currency() || ref.RoundID() != pending.RoundID() {
-			return nil
+			if pending.AttemptCount() >= 9 {
+				w, e := s.Wallet.GetForUpdate(ctx, tx, pending.WalletID())
+				if e != nil {
+					return e
+				}
+				r := domain.WagerTransactionResult{Balance: w.Balance(), WalletVersion: w.Version()}
+				terminal, e := domain.RehydrateExternalWagerTransaction(domain.RehydratedWagerTransaction{WagerTransactionInput: domain.WagerTransactionInput{ID: pending.ID(), ExternalID: pending.ExternalID(), ProviderID: pending.ProviderID(), PlayerID: pending.PlayerID(), WalletID: pending.WalletID(), IdempotencyKey: pending.IdempotencyKey(), PayloadHash: pending.PayloadHash(), GameID: pending.GameID(), RoundID: pending.RoundID(), Kind: pending.Type(), Amount: pending.Amount(), ReferenceExternalID: pending.ReferenceExternalID()}, Status: domain.TransactionRejected, FailureCode: "REFERENCE_NOT_FOUND", Result: &r, CreatedAt: pending.CreatedAt(), UpdatedAt: now})
+				if e != nil {
+					return e
+				}
+				if e = s.Transactions.UpdateTerminalFrom(ctx, tx, terminal, domain.TransactionPendingReference, ""); e != nil {
+					return e
+				}
+				payload, _ := json.Marshal(map[string]any{"transactionId": pending.ID(), "walletId": w.ID(), "state": "REJECTED", "operationType": string(pending.Type()), "failureCode": "REFERENCE_NOT_FOUND", "resultingBalance": map[string]string{"amount": formatMoney(w.Balance()), "currency": w.Currency()}})
+				return s.Outbox.Insert(ctx, tx, OutboxEvent{ID: pending.ID() + ":rejected", AggregateID: w.ID(), TransactionID: pending.ID(), EventType: "WagerTransactionRejected", CorrelationID: pending.ID(), EventVersion: 1, Payload: payload})
+			}
+			delay := time.Second << pending.AttemptCount()
+			if delay > 300*time.Second {
+				delay = 300 * time.Second
+			}
+			return s.Transactions.ReschedulePendingReference(ctx, tx, pending, now.Add(delay))
 		}
 		w, err := s.Wallet.GetForUpdate(ctx, tx, pending.WalletID())
 		if err != nil {

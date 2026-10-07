@@ -45,7 +45,8 @@ func (TransactionRepository) getExternal(ctx context.Context, tx pgx.Tx, suffix 
 	var resultCurrency *string
 	var version *int64
 	var created, updated time.Time
-	err := tx.QueryRow(ctx, `SELECT id,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,reference_external_id,reference_transaction_id,failure_code,result_balance_minor,result_currency,result_wallet_version,created_at,updated_at FROM wager_transactions `+suffix, args...).Scan(&id, &external, &provider, &key, &hash, &player, &wallet, &game, &round, &kind, &amount, &currency, &status, &ref, &refTx, &failure, &balance, &resultCurrency, &version, &created, &updated)
+	var attempts int
+	err := tx.QueryRow(ctx, `SELECT id,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,reference_external_id,reference_transaction_id,failure_code,result_balance_minor,result_currency,result_wallet_version,attempt_count,created_at,updated_at FROM wager_transactions `+suffix, args...).Scan(&id, &external, &provider, &key, &hash, &player, &wallet, &game, &round, &kind, &amount, &currency, &status, &ref, &refTx, &failure, &balance, &resultCurrency, &version, &attempts, &created, &updated)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.WagerTransaction{}, errors.Join(application.ErrNotFound, ErrNotFound, err)
 	}
@@ -64,7 +65,7 @@ func (TransactionRepository) getExternal(ctx context.Context, tx pgx.Tx, suffix 
 		}
 		result = &domain.WagerTransactionResult{Balance: rm, WalletVersion: *version}
 	}
-	in := domain.RehydratedWagerTransaction{WagerTransactionInput: domain.WagerTransactionInput{ID: id, ExternalID: external, ProviderID: provider, PlayerID: player, WalletID: wallet, IdempotencyKey: key, PayloadHash: hash, GameID: game, RoundID: round, Kind: domain.WagerTransactionType(kind), Amount: m}, Status: domain.WagerTransactionStatus(status), Result: result, CreatedAt: created, UpdatedAt: updated}
+	in := domain.RehydratedWagerTransaction{WagerTransactionInput: domain.WagerTransactionInput{ID: id, ExternalID: external, ProviderID: provider, PlayerID: player, WalletID: wallet, IdempotencyKey: key, PayloadHash: hash, GameID: game, RoundID: round, Kind: domain.WagerTransactionType(kind), Amount: m}, Status: domain.WagerTransactionStatus(status), Result: result, CreatedAt: created, UpdatedAt: updated, AttemptCount: attempts}
 	if ref != nil {
 		in.ReferenceExternalID = *ref
 	}
@@ -75,6 +76,17 @@ func (TransactionRepository) getExternal(ctx context.Context, tx pgx.Tx, suffix 
 		in.FailureCode = *failure
 	}
 	return domain.RehydrateExternalWagerTransaction(in)
+}
+
+func (TransactionRepository) ReschedulePendingReference(ctx context.Context, tx pgx.Tx, t domain.WagerTransaction, next time.Time) error {
+	tag, err := tx.Exec(ctx, `UPDATE wager_transactions SET attempt_count=$1,next_attempt_at=$2,updated_at=$3 WHERE id=$4 AND status='PENDING_REFERENCE'`, t.AttemptCount()+1, next, next, t.ID())
+	if err != nil {
+		return classifyApplication(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return application.ErrConflict
+	}
+	return nil
 }
 
 func (TransactionRepository) InsertExternalPending(ctx context.Context, tx pgx.Tx, t domain.WagerTransaction) error {
@@ -92,7 +104,7 @@ func (TransactionRepository) UpdateTerminalFrom(ctx context.Context, tx pgx.Tx, 
 	if !ok {
 		return errors.New("missing result")
 	}
-	tag, err := tx.Exec(ctx, `UPDATE wager_transactions SET status=$1,failure_code=$2,reference_transaction_id=NULLIF($3,''),result_balance_minor=$4,result_currency=$5,result_wallet_version=$6,next_attempt_at=NULL,updated_at=$7 WHERE id=$8 AND status=$9`, t.Status(), nilIfEmpty(t.FailureCode()), ref, r.Balance.MinorUnits(), r.Balance.Currency(), r.WalletVersion, t.UpdatedAt(), t.ID(), expected)
+	tag, err := tx.Exec(ctx, `UPDATE wager_transactions SET status=$1,failure_code=$2,reference_transaction_id=NULLIF($3,''),result_balance_minor=$4,result_currency=$5,result_wallet_version=$6,attempt_count=CASE WHEN status='PENDING_REFERENCE' THEN attempt_count+1 ELSE attempt_count END,next_attempt_at=NULL,updated_at=$7 WHERE id=$8 AND status=$9`, t.Status(), nilIfEmpty(t.FailureCode()), ref, r.Balance.MinorUnits(), r.Balance.Currency(), r.WalletVersion, t.UpdatedAt(), t.ID(), expected)
 	if err != nil {
 		return classify(err)
 	}

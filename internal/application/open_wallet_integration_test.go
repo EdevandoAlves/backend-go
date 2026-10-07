@@ -24,27 +24,38 @@ func TestOpenWalletIntegration(t *testing.T) {
 		t.Fatal("TEST_DATABASE_URL must target a _test database")
 	}
 	root, _ := filepath.Abs("../../")
-	up, err := os.ReadFile(filepath.Join(root, "migrations", "000001_schema.up.sql"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	down, err := os.ReadFile(filepath.Join(root, "migrations", "000001_schema.down.sql"))
-	if err != nil {
-		t.Fatal(err)
+	var migrations []string
+	for _, name := range []string{"000001_schema.up.sql", "000002_wager_currency.up.sql", "000003_pending_reference.up.sql"} {
+		b, readErr := os.ReadFile(filepath.Join(root, "migrations", name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		migrations = append(migrations, string(b))
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
-	if _, err = pool.Exec(ctx, string(down)); err != nil {
+	if _, err = pool.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; SET search_path TO public"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, string(up)); err != nil {
+	for _, migration := range migrations {
+		if _, err = pool.Exec(ctx, migration); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = pool.Exec(ctx, "SET search_path TO public"); err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Exec(ctx, string(down))
+	defer func() {
+		pool.Close()
+		cleanup, e := pgxpool.New(ctx, os.Getenv("TEST_DATABASE_URL"))
+		if e == nil {
+			_, _ = cleanup.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
+			cleanup.Close()
+		}
+	}()
 	p, err := postgres.NewPool(ctx, url)
 	if err != nil {
 		t.Fatal(err)

@@ -38,6 +38,7 @@ type ExternalTransactionWriter interface {
 	GetExternalByIdempotencyKey(context.Context, pgx.Tx, string, string) (domain.WagerTransaction, error)
 	GetExternalByExternalID(context.Context, pgx.Tx, string, string) (domain.WagerTransaction, error)
 	ClaimPendingReference(context.Context, pgx.Tx, time.Time) (domain.WagerTransaction, error)
+	ReschedulePendingReference(context.Context, pgx.Tx, domain.WagerTransaction, time.Time) error
 }
 
 type LedgerWriter interface {

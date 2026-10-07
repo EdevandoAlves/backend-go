@@ -36,6 +36,7 @@ type WagerTransaction struct {
 	failureCode                                    string
 	result                                         *WagerTransactionResult
 	createdAt, updatedAt                           time.Time
+	attemptCount                                   int
 }
 
 type WagerTransactionResult struct {
@@ -58,6 +59,7 @@ type RehydratedWagerTransaction struct {
 	FailureCode            string
 	Result                 *WagerTransactionResult
 	CreatedAt, UpdatedAt   time.Time
+	AttemptCount           int
 }
 
 func CreateExternalWagerTransaction(input WagerTransactionInput, now time.Time) (WagerTransaction, error) {
@@ -119,6 +121,7 @@ func RehydrateExternalWagerTransaction(input RehydratedWagerTransaction) (WagerT
 		input.Result.Balance = resultAmount
 	}
 	tx.status, tx.referenceTransactionID, tx.failureCode, tx.result, tx.updatedAt = input.Status, input.ReferenceTransactionID, input.FailureCode, input.Result, input.UpdatedAt
+	tx.attemptCount = input.AttemptCount
 	return tx, nil
 }
 
@@ -188,6 +191,7 @@ func (t WagerTransaction) Result() (WagerTransactionResult, bool) {
 }
 func (t WagerTransaction) CreatedAt() time.Time { return t.createdAt }
 func (t WagerTransaction) UpdatedAt() time.Time { return t.updatedAt }
+func (t WagerTransaction) AttemptCount() int    { return t.attemptCount }
 
 func (t *WagerTransaction) Process(result WagerTransactionResult, now time.Time) error {
 	if t.status != TransactionPending {
