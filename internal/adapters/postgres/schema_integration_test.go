@@ -27,14 +27,24 @@ func TestMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	up, err := os.ReadFile(filepath.Join(root, "migrations", "000001_schema.up.sql"))
+	up1, err := os.ReadFile(filepath.Join(root, "migrations", "000001_schema.up.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	down, err := os.ReadFile(filepath.Join(root, "migrations", "000001_schema.down.sql"))
+	up2, err := os.ReadFile(filepath.Join(root, "migrations", "000002_wager_currency.up.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	down2, err := os.ReadFile(filepath.Join(root, "migrations", "000002_wager_currency.down.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	down1, err := os.ReadFile(filepath.Join(root, "migrations", "000001_schema.down.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := string(up1) + "\n" + string(up2)
+	down := string(down2) + "\n" + string(down1)
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
@@ -42,7 +52,7 @@ func TestMigrations(t *testing.T) {
 	}
 	defer conn.Close(ctx)
 	reset := func() {
-		if _, err := conn.Exec(ctx, string(down)); err != nil {
+		if _, err := conn.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public"); err != nil {
 			t.Fatalf("reset schema: %v", err)
 		}
 	}
@@ -83,6 +93,43 @@ func testConstraints(t *testing.T, conn *pgx.Conn) {
 	}
 	if err := exec("INSERT INTO wallets(id,player_id,currency,balance_minor) VALUES ('w2','p1','USD',0)"); err != nil {
 		t.Fatal(err)
+	}
+	if err := exec("INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status) VALUES ('usd-win','EXTERNAL','usd-ext','usd-provider','usd-key','" + hash + "','p1','w1','g','r','WIN',100,'USD','PENDING')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec("UPDATE wager_transactions SET status='REJECTED',failure_code='CURRENCY_MISMATCH',result_balance_minor=0,result_currency='BRL',result_wallet_version=1 WHERE id='usd-win'"); err != nil {
+		t.Fatal(err)
+	}
+	mustFail("processed result currency mismatch", "23514", "INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,result_balance_minor,result_currency,result_wallet_version) VALUES ('usd-processed','EXTERNAL','usd-p2','p2','k-p2','"+hash+"','p1','w1','g','r','WIN',100,'USD','PROCESSED',0,'BRL',1)")
+	invalidBase := []struct{ name, column, value string }{
+		{"origin", "origin", "'OTHER'"}, {"kind", "kind", "'OTHER'"}, {"negative amount", "amount_minor", "-1"},
+		{"currency", "currency", "'EUR'"}, {"status", "status", "'OTHER'"}, {"negative result", "result_balance_minor", "-1"},
+		{"result currency", "result_currency", "'EUR'"}, {"result version", "result_wallet_version", "0"}, {"negative attempts", "attempt_count", "-1"},
+	}
+	for _, tc := range invalidBase {
+		columns := "id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,result_balance_minor,result_currency,result_wallet_version,attempt_count"
+		values := "'invalid-" + strings.ReplaceAll(tc.name, " ", "-") + "','EXTERNAL','e-invalid','p-invalid','k-invalid','" + hash + "','p1','w1','g','r','WIN',100,'BRL','PENDING',NULL,NULL,NULL,0"
+		switch tc.column {
+		case "origin":
+			values = strings.Replace(values, "'EXTERNAL'", tc.value, 1)
+		case "kind":
+			values = strings.Replace(values, "'WIN'", tc.value, 1)
+		case "amount_minor":
+			values = strings.Replace(values, ",100,'BRL'", ","+tc.value+",'BRL'", 1)
+		case "currency":
+			values = strings.Replace(values, ",'BRL','PENDING'", ","+tc.value+",'PENDING'", 1)
+		case "status":
+			values = strings.Replace(values, "'PENDING',NULL", tc.value+",NULL", 1)
+		case "result_balance_minor":
+			values = strings.Replace(values, "NULL,NULL,NULL,0", tc.value+",NULL,NULL,0", 1)
+		case "result_currency":
+			values = strings.Replace(values, "NULL,NULL,NULL,0", "NULL,"+tc.value+",NULL,0", 1)
+		case "result_wallet_version":
+			values = strings.Replace(values, "NULL,NULL,NULL,0", "NULL,NULL,"+tc.value+",0", 1)
+		case "attempt_count":
+			values = strings.Replace(values, "NULL,NULL,NULL,0", "NULL,NULL,NULL,"+tc.value, 1)
+		}
+		mustFail("invalid "+tc.name, "23514", "INSERT INTO wager_transactions("+columns+") VALUES ("+values+")")
 	}
 	mustFail("blank wallet id", "23514", "INSERT INTO wallets(id,player_id,currency,balance_minor) VALUES (' ','p2','BRL',0)")
 	mustFail("negative wallet", "23514", "INSERT INTO wallets(id,player_id,currency,balance_minor) VALUES ('wn','p2','BRL',-1)")

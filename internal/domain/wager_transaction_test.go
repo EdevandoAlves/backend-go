@@ -198,3 +198,61 @@ func TestExternalReferenceRules(t *testing.T) {
 		}
 	}
 }
+
+func TestWagerTransactionProcessPersistsResult(t *testing.T) {
+	amount, _ := ParseMoney("1.00", "USD")
+	tx, err := CreateExternalWagerTransaction(WagerTransactionInput{ID: "id", ExternalID: "ext", ProviderID: "provider", PlayerID: "player", WalletID: "wallet", IdempotencyKey: "idem", PayloadHash: "hash", GameID: "game", RoundID: "round", Kind: TransactionBet, Amount: amount}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	result := WagerTransactionResult{Balance: amount, WalletVersion: 2}
+	if err := tx.Process(result, now); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := tx.Result()
+	if !ok || tx.Status() != TransactionProcessed || got != result || !tx.UpdatedAt().Equal(now) {
+		t.Fatalf("process = %#v, result=%#v, ok=%v", tx, got, ok)
+	}
+}
+
+func TestWagerTransactionRejectsInsufficientFunds(t *testing.T) {
+	amount, _ := ParseMoney("1.00", "BRL")
+	tx, _ := CreateExternalWagerTransaction(WagerTransactionInput{ID: "id", ExternalID: "ext", ProviderID: "provider", PlayerID: "player", WalletID: "wallet", IdempotencyKey: "idem", PayloadHash: "hash", GameID: "game", RoundID: "round", Kind: TransactionBet, Amount: amount}, time.Now())
+	result := WagerTransactionResult{Balance: func() Money { m, _ := ParseMoney("0.00", "BRL"); return m }(), WalletVersion: 3}
+	if err := tx.Reject("INSUFFICIENT_FUNDS", result, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if tx.Status() != TransactionRejected || tx.FailureCode() != "INSUFFICIENT_FUNDS" {
+		t.Fatalf("reject = %#v", tx)
+	}
+}
+
+func TestWagerTransactionRejectsCurrencyMismatchWithWalletCurrency(t *testing.T) {
+	amount, _ := ParseMoney("1.00", "USD")
+	walletBalance, _ := ParseMoney("10.00", "BRL")
+	tx, _ := CreateExternalWagerTransaction(WagerTransactionInput{ID: "id", ExternalID: "ext", ProviderID: "provider", PlayerID: "player", WalletID: "wallet", IdempotencyKey: "idem", PayloadHash: "hash", GameID: "game", RoundID: "round", Kind: TransactionBet, Amount: amount}, time.Now())
+	if err := tx.Reject("CURRENCY_MISMATCH", WagerTransactionResult{Balance: walletBalance, WalletVersion: 4}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if tx.Status() != TransactionRejected || tx.FailureCode() != "CURRENCY_MISMATCH" {
+		t.Fatalf("currency reject = %#v", tx)
+	}
+}
+
+func TestWagerTransactionTerminalCannotProcessOrRejectAgain(t *testing.T) {
+	amount, _ := ParseMoney("1.00", "BRL")
+	tx, _ := CreateExternalWagerTransaction(WagerTransactionInput{ID: "id", ExternalID: "ext", ProviderID: "provider", PlayerID: "player", WalletID: "wallet", IdempotencyKey: "idem", PayloadHash: "hash", GameID: "game", RoundID: "round", Kind: TransactionBet, Amount: amount}, time.Now())
+	result := WagerTransactionResult{Balance: amount, WalletVersion: 1}
+	if err := tx.Process(result, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := tx.Result()
+	if err := tx.Reject("OTHER", result, time.Now().Add(time.Minute)); !errors.Is(err, ErrTerminalTransaction) {
+		t.Fatalf("terminal reject error = %v", err)
+	}
+	after, _ := tx.Result()
+	if tx.Status() != TransactionProcessed || tx.FailureCode() != "" || before != after {
+		t.Fatalf("terminal transaction changed = %#v", tx)
+	}
+}

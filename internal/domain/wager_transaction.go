@@ -98,7 +98,7 @@ func RehydrateExternalWagerTransaction(input RehydratedWagerTransaction) (WagerT
 		return WagerTransaction{}, ErrInvalidTransaction
 	}
 	if input.Status == TransactionProcessed || input.Status == TransactionRejected {
-		if !validResult(input.Result, amount) || input.FailureCode != "" && input.Status == TransactionProcessed {
+		if !validResult(input.Result, amount, input.Status == TransactionRejected && input.FailureCode == "CURRENCY_MISMATCH") || input.FailureCode != "" && input.Status == TransactionProcessed {
 			return WagerTransaction{}, ErrInvalidTransaction
 		}
 	} else if input.Status == TransactionFailed {
@@ -142,11 +142,11 @@ func validReference(kind WagerTransactionType, reference string) bool {
 	}
 }
 
-func validResult(result *WagerTransactionResult, amount Money) bool {
-	if result == nil || result.WalletVersion < 1 || result.Balance.Currency() != amount.Currency() {
+func validResult(result *WagerTransactionResult, amount Money, allowCurrencyMismatch ...bool) bool {
+	if result == nil || result.WalletVersion < 1 || result.Balance.MinorUnits() < 0 {
 		return false
 	}
-	return result.Balance.MinorUnits() >= 0
+	return len(allowCurrencyMismatch) > 0 && allowCurrencyMismatch[0] || result.Balance.Currency() == amount.Currency()
 }
 
 func validFailureCode(code string) bool {
@@ -188,6 +188,28 @@ func (t WagerTransaction) Result() (WagerTransactionResult, bool) {
 }
 func (t WagerTransaction) CreatedAt() time.Time { return t.createdAt }
 func (t WagerTransaction) UpdatedAt() time.Time { return t.updatedAt }
+
+func (t *WagerTransaction) Process(result WagerTransactionResult, now time.Time) error {
+	if t.status != TransactionPending {
+		return ErrTerminalTransaction
+	}
+	if !validResult(&result, t.amount) {
+		return ErrInvalidTransaction
+	}
+	t.status, t.result, t.updatedAt = TransactionProcessed, &result, now
+	return nil
+}
+
+func (t *WagerTransaction) Reject(failureCode string, result WagerTransactionResult, now time.Time) error {
+	if t.status != TransactionPending {
+		return ErrTerminalTransaction
+	}
+	if !validFailureCode(failureCode) || !validResult(&result, t.amount, failureCode == "CURRENCY_MISMATCH") {
+		return ErrInvalidTransaction
+	}
+	t.status, t.failureCode, t.result, t.updatedAt = TransactionRejected, failureCode, &result, now
+	return nil
+}
 
 func (t *WagerTransaction) Transition(status WagerTransactionStatus, now time.Time) error {
 	if !validTransactionStatus(status) {
