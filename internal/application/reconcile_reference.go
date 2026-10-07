@@ -22,6 +22,7 @@ type ReconcileReferenceService struct {
 	Transactions ExternalTransactionWriter
 	Ledger       LedgerWriter
 	Outbox       OutboxWriter
+	AfterStep    func(string) error
 }
 
 func (s ReconcileReferenceService) ReconcileOne(ctx context.Context, now time.Time, ids ReconcileReferenceIDs) (bool, error) {
@@ -73,6 +74,11 @@ func (s ReconcileReferenceService) ReconcileOne(ctx context.Context, now time.Ti
 		if err = s.Wallet.Save(ctx, tx, w, w.Version()-1); err != nil {
 			return err
 		}
+		if s.AfterStep != nil {
+			if err = s.AfterStep("afterWallet"); err != nil {
+				return err
+			}
+		}
 		result := domain.WagerTransactionResult{Balance: w.Balance(), WalletVersion: w.Version()}
 		terminal, err := domain.RehydrateExternalWagerTransaction(domain.RehydratedWagerTransaction{WagerTransactionInput: domain.WagerTransactionInput{ID: pending.ID(), ExternalID: pending.ExternalID(), ProviderID: pending.ProviderID(), PlayerID: pending.PlayerID(), WalletID: pending.WalletID(), IdempotencyKey: pending.IdempotencyKey(), PayloadHash: pending.PayloadHash(), GameID: pending.GameID(), RoundID: pending.RoundID(), Kind: pending.Type(), Amount: pending.Amount(), ReferenceExternalID: pending.ReferenceExternalID()}, Status: domain.TransactionProcessed, ReferenceTransactionID: ref.ID(), Result: &result, CreatedAt: pending.CreatedAt(), UpdatedAt: now})
 		if err != nil {
@@ -87,6 +93,11 @@ func (s ReconcileReferenceService) ReconcileOne(ctx context.Context, now time.Ti
 		}
 		if err = s.Ledger.Insert(ctx, tx, entry); err != nil {
 			return err
+		}
+		if s.AfterStep != nil {
+			if err = s.AfterStep("afterLedger"); err != nil {
+				return err
+			}
 		}
 		money := func(m domain.Money) map[string]string {
 			return map[string]string{"amount": formatMoney(m), "currency": m.Currency()}

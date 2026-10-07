@@ -4,6 +4,7 @@ package application_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,67 @@ import (
 	"github.com/EdevandoAlves/backend-go/internal/application"
 	"github.com/jackc/pgx/v5"
 )
+
+func setupReconcileDatabase(t *testing.T, id string) (*pgx.Conn, string, time.Time) {
+	t.Helper()
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" || !strings.Contains(url, "_test") {
+		t.Fatal("TEST_DATABASE_URL must target a _test database")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = conn.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; SET search_path TO public"); err != nil {
+		conn.Close(ctx)
+		t.Fatal(err)
+	}
+	root, _ := filepath.Abs("../../")
+	for _, name := range []string{"000001_schema.up.sql", "000002_wager_currency.up.sql", "000003_pending_reference.up.sql"} {
+		b, e := os.ReadFile(filepath.Join(root, "migrations", name))
+		if e != nil {
+			conn.Close(ctx)
+			t.Fatal(e)
+		}
+		if _, e = conn.Exec(ctx, string(b)); e != nil {
+			conn.Close(ctx)
+			t.Fatal(e)
+		}
+	}
+	now := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	hash := strings.Repeat("c", 64)
+	if _, err = conn.Exec(ctx, `INSERT INTO wallets(id,player_id,currency,balance_minor,version,created_at,updated_at) VALUES ($1,$2,'BRL',7500,2,$3,$3)`, id+"-wallet", id+"-player", now); err != nil {
+		conn.Close(ctx)
+		t.Fatal(err)
+	}
+	if _, err = conn.Exec(ctx, `INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,reference_external_id,attempt_count,next_attempt_at) VALUES ($1,'EXTERNAL',$2,$3,$4,$5,$6,$7,'game','round','REFUND',2500,'BRL','PENDING_REFERENCE','bet-later',0,$8)`, id+"-refund", id+"-refund-ext", id+"-provider", id+"-key", hash, id+"-player", id+"-wallet", now); err != nil {
+		conn.Close(ctx)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		conn.Close(ctx)
+		cleanup, e := pgx.Connect(ctx, url)
+		if e == nil {
+			_, _ = cleanup.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
+			cleanup.Close(ctx)
+		}
+	})
+	return conn, url, now
+}
+
+func reconcileService(t *testing.T, ctx context.Context, url string) *postgres.Pool {
+	t.Helper()
+	p, err := postgres.NewPool(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func reconcileApp(p *postgres.Pool) application.ReconcileReferenceService {
+	return application.ReconcileReferenceService{Manager: postgres.NewTxManager(p), Wallet: postgres.WalletRepository{}, Transactions: postgres.TransactionRepository{}, Ledger: postgres.LedgerRepository{}, Outbox: postgres.OutboxRepository{}}
+}
 
 func TestReconcileReferenceIntegration(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
@@ -32,7 +94,10 @@ func TestReconcileReferenceIntegration(t *testing.T) {
 	defer func() {
 		conn.Close(ctx)
 		cleanup, e := pgx.Connect(ctx, url)
-		if e == nil { _, _ = cleanup.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public"); cleanup.Close(ctx) }
+		if e == nil {
+			_, _ = cleanup.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
+			cleanup.Close(ctx)
+		}
 	}()
 	root, _ := filepath.Abs("../../")
 	for _, name := range []string{"000001_schema.up.sql", "000002_wager_currency.up.sql", "000003_pending_reference.up.sql"} {
@@ -108,7 +173,10 @@ func TestReconcileReferenceRetryExhaustion(t *testing.T) {
 	defer func() {
 		conn.Close(ctx)
 		cleanup, e := pgx.Connect(ctx, url)
-		if e == nil { _, _ = cleanup.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public"); cleanup.Close(ctx) }
+		if e == nil {
+			_, _ = cleanup.Exec(ctx, "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
+			cleanup.Close(ctx)
+		}
 	}()
 	root, _ := filepath.Abs("../../")
 	for _, name := range []string{"000001_schema.up.sql", "000002_wager_currency.up.sql", "000003_pending_reference.up.sql"} {
@@ -190,5 +258,133 @@ func TestReconcileReferenceRetryExhaustion(t *testing.T) {
 	}
 	if err = conn.QueryRow(ctx, "SELECT count(*) FROM outbox_events WHERE transaction_id='retry-refund' AND event_type='WagerTransactionRejected' AND id='retry-refund:rejected'").Scan(&n); err != nil || n != 1 {
 		t.Fatalf("rejected outbox=%d err=%v", n, err)
+	}
+}
+
+func TestReconcileReferenceConcurrentClaim(t *testing.T) {
+	conn, url, now := setupReconcileDatabase(t, "concurrent")
+	ctx := context.Background()
+	if _, err := conn.Exec(ctx, `INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,result_balance_minor,result_currency,result_wallet_version) VALUES ('concurrent-bet','EXTERNAL','bet-later','concurrent-provider','bet-key',$1,'concurrent-player','concurrent-wallet','game','round','BET',2500,'BRL','PROCESSED',7500,'BRL',2)`, strings.Repeat("d", 64)); err != nil {
+		t.Fatal(err)
+	}
+	p1 := reconcileService(t, ctx, url)
+	p2 := reconcileService(t, ctx, url)
+	defer p1.Close()
+	defer p2.Close()
+	start := make(chan struct{})
+	results := make(chan bool, 2)
+	errs := make(chan error, 2)
+	for _, svc := range []application.ReconcileReferenceService{reconcileApp(p1), reconcileApp(p2)} {
+		go func(s application.ReconcileReferenceService) {
+			<-start
+			worked, err := s.ReconcileOne(ctx, now, application.ReconcileReferenceIDs{ProcessedEventID: "concurrent:processed", BalanceEventID: "concurrent:balance", LedgerID: "concurrent:ledger"})
+			results <- worked
+			errs <- err
+		}(svc)
+	}
+	close(start)
+	worked := 0
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+		if <-results {
+			worked++
+		}
+	}
+	if worked != 1 {
+		t.Fatalf("worked=%d", worked)
+	}
+	var balance, ledger, events int
+	if err := conn.QueryRow(ctx, "SELECT balance_minor FROM wallets WHERE id='concurrent-wallet'").Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if balance != 10000 {
+		t.Fatalf("balance=%d", balance)
+	}
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE transaction_id='concurrent-refund'").Scan(&ledger); err != nil {
+		t.Fatal(err)
+	}
+	if ledger != 1 {
+		t.Fatalf("ledger=%d", ledger)
+	}
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM outbox_events WHERE transaction_id='concurrent-refund'").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 2 {
+		t.Fatalf("events=%d", events)
+	}
+}
+
+func TestReconcileReferenceRestart(t *testing.T) {
+	conn, url, now := setupReconcileDatabase(t, "restart")
+	ctx := context.Background()
+	p1 := reconcileService(t, ctx, url)
+	if worked, err := reconcileApp(p1).ReconcileOne(ctx, now, application.ReconcileReferenceIDs{}); err != nil || !worked {
+		t.Fatalf("first worked=%v err=%v", worked, err)
+	}
+	p1.Close()
+	if _, err := conn.Exec(ctx, `INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,result_balance_minor,result_currency,result_wallet_version) VALUES ('restart-bet','EXTERNAL','bet-later','restart-provider','bet-key',$1,'restart-player','restart-wallet','game','round','BET',2500,'BRL','PROCESSED',7500,'BRL',2)`, strings.Repeat("e", 64)); err != nil {
+		t.Fatal(err)
+	}
+	p2 := reconcileService(t, ctx, url)
+	defer p2.Close()
+	worked, err := reconcileApp(p2).ReconcileOne(ctx, now.Add(time.Second), application.ReconcileReferenceIDs{ProcessedEventID: "restart:processed", BalanceEventID: "restart:balance", LedgerID: "restart:ledger"})
+	if err != nil || !worked {
+		t.Fatalf("restart worked=%v err=%v", worked, err)
+	}
+	worked, err = reconcileApp(p2).ReconcileOne(ctx, now.Add(2*time.Second), application.ReconcileReferenceIDs{})
+	if err != nil || worked {
+		t.Fatalf("replay worked=%v err=%v", worked, err)
+	}
+	var balance, ledger, events int
+	if err = conn.QueryRow(ctx, "SELECT balance_minor FROM wallets WHERE id='restart-wallet'").Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if err = conn.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE transaction_id='restart-refund'").Scan(&ledger); err != nil {
+		t.Fatal(err)
+	}
+	if err = conn.QueryRow(ctx, "SELECT count(*) FROM outbox_events WHERE transaction_id='restart-refund'").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if balance != 10000 || ledger != 1 || events != 2 {
+		t.Fatalf("state=%d/%d/%d", balance, ledger, events)
+	}
+}
+
+func TestReconcileReferenceRollbackOnInjectedError(t *testing.T) {
+	conn, url, now := setupReconcileDatabase(t, "rollback")
+	ctx := context.Background()
+	if _, err := conn.Exec(ctx, `INSERT INTO wager_transactions(id,origin,external_id,provider_id,idempotency_key,payload_hash,player_id,wallet_id,game_id,round_id,kind,amount_minor,currency,status,result_balance_minor,result_currency,result_wallet_version) VALUES ('rollback-bet','EXTERNAL','bet-later','rollback-provider','bet-key',$1,'rollback-player','rollback-wallet','game','round','BET',2500,'BRL','PROCESSED',7500,'BRL',2)`, strings.Repeat("f", 64)); err != nil {
+		t.Fatal(err)
+	}
+	p := reconcileService(t, ctx, url)
+	defer p.Close()
+	s := reconcileApp(p)
+	s.AfterStep = func(step string) error {
+		if step == "afterLedger" {
+			return errors.New("injected")
+		}
+		return nil
+	}
+	if worked, err := s.ReconcileOne(ctx, now, application.ReconcileReferenceIDs{ProcessedEventID: "rollback:processed", BalanceEventID: "rollback:balance", LedgerID: "rollback:ledger"}); err == nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	var status string
+	var balance, ledger, events int
+	if err := conn.QueryRow(ctx, "SELECT status FROM wager_transactions WHERE id='rollback-refund'").Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(ctx, "SELECT balance_minor FROM wallets WHERE id='rollback-wallet'").Scan(&balance); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE transaction_id='rollback-refund'").Scan(&ledger); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM outbox_events WHERE transaction_id='rollback-refund'").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if status != "PENDING_REFERENCE" || balance != 7500 || ledger != 0 || events != 0 {
+		t.Fatalf("state=%s/%d/%d/%d", status, balance, ledger, events)
 	}
 }
