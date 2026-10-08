@@ -106,7 +106,22 @@ func (s ProcessWagerService) Execute(ctx context.Context, c ProcessWagerCommand)
 	return err
 }
 func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCommand) (ProcessWagerResult, error) {
-	if c.ID == "" || c.ProviderID == "" || c.ExternalID == "" || c.IdempotencyKey == "" || c.PlayerID == "" || c.WalletID == "" || c.GameID == "" || c.RoundID == "" || c.Now.IsZero() || (c.Kind != domain.TransactionBet && c.Kind != domain.TransactionWin && c.Kind != domain.TransactionLoss && c.Kind != domain.TransactionRefund && c.Kind != domain.TransactionRollback) {
+	if !validProcessWagerCommand(c) {
+		return ProcessWagerResult{}, domain.ErrInvalidTransaction
+	}
+	var result ProcessWagerResult
+	err := s.Manager.WithinTransaction(ctx, func(tx pgx.Tx) error {
+		var err error
+		result, err = s.ExecuteResultTx(ctx, tx, c)
+		return err
+	})
+	return result, err
+}
+
+// ExecuteResultTx applies the same financial rules as HTTP while allowing a
+// transport adapter to commit its inbox record in the same database transaction.
+func (s ProcessWagerService) ExecuteResultTx(ctx context.Context, tx pgx.Tx, c ProcessWagerCommand) (ProcessWagerResult, error) {
+	if !validProcessWagerCommand(c) {
 		return ProcessWagerResult{}, domain.ErrInvalidTransaction
 	}
 	hash, err := CanonicalWagerHash(c)
@@ -114,7 +129,7 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 		return ProcessWagerResult{}, err
 	}
 	var result ProcessWagerResult
-	err = s.Manager.WithinTransaction(ctx, func(tx pgx.Tx) error {
+	err = func() error {
 		t, e := domain.CreateExternalWagerTransaction(domain.WagerTransactionInput{ID: c.ID, ExternalID: c.ExternalID, ProviderID: c.ProviderID, PlayerID: c.PlayerID, WalletID: c.WalletID, IdempotencyKey: c.IdempotencyKey, PayloadHash: hash, GameID: c.GameID, RoundID: c.RoundID, Kind: c.Kind, Amount: c.Amount, ReferenceExternalID: c.ReferenceExternalID}, c.Now)
 		if e != nil {
 			return e
@@ -282,8 +297,12 @@ func (s ProcessWagerService) ExecuteResult(ctx context.Context, c ProcessWagerCo
 		}
 		result = ProcessWagerResult{TransactionID: t.ID(), ExternalID: t.ExternalID(), Status: t.Status(), FailureCode: t.FailureCode(), Balance: w.Balance(), WalletVersion: w.Version(), CreatedAt: t.CreatedAt(), ProcessedAt: t.UpdatedAt()}
 		return nil
-	})
+	}()
 	return result, err
+}
+
+func validProcessWagerCommand(c ProcessWagerCommand) bool {
+	return c.ID != "" && c.ProviderID != "" && c.ExternalID != "" && c.IdempotencyKey != "" && c.PlayerID != "" && c.WalletID != "" && c.GameID != "" && c.RoundID != "" && !c.Now.IsZero() && (c.Kind == domain.TransactionBet || c.Kind == domain.TransactionWin || c.Kind == domain.TransactionLoss || c.Kind == domain.TransactionRefund || c.Kind == domain.TransactionRollback)
 }
 
 func (s ProcessWagerService) insertRejected(ctx context.Context, tx pgx.Tx, c ProcessWagerCommand, t domain.WagerTransaction, result domain.WagerTransactionResult) error {

@@ -26,3 +26,8 @@ func (p *Pool) Close() {
 	}
 }
 func (p *Pool) Pool() *pgxpool.Pool { return p.pool }
+
+func (p *Pool) Exec(ctx context.Context, sql string, args ...any) error {
+	_, err := p.pool.Exec(ctx, sql, args...)
+	return err
+}

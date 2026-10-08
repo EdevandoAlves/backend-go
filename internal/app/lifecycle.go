@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/EdevandoAlves/backend-go/internal/adapters/httpapi"
+	"github.com/EdevandoAlves/backend-go/internal/adapters/postgres"
 	"github.com/EdevandoAlves/backend-go/internal/config"
 	"go.uber.org/fx"
 )
@@ -22,7 +23,6 @@ func RegisterHTTPServer(lifecycle fx.Lifecycle, cfg config.Config, readiness *ht
 			if err != nil {
 				return err
 			}
-			readiness.Set(true)
 			go func() {
 				if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					logger.Error("HTTP server stopped unexpectedly", "error", err)
@@ -35,4 +35,12 @@ func RegisterHTTPServer(lifecycle fx.Lifecycle, cfg config.Config, readiness *ht
 			return server.Shutdown(ctx)
 		},
 	})
+}
+
+func RegisterPoolLifecycle(lifecycle fx.Lifecycle, pool *postgres.Pool, readiness *httpapi.Readiness) {
+	lifecycle.Append(fx.Hook{OnStop: func(context.Context) error {
+		readiness.Set(false)
+		pool.Close()
+		return nil
+	}})
 }
