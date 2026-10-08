@@ -123,6 +123,19 @@
       "protocol": "openid-connect",
       "protocolMappers": [
         {
+          "name": "wallet-write-permission",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "config": {
+            "claim.name": "wallet_write",
+            "claim.value": "true",
+            "jsonType.label": "boolean",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
           "name": "backend-go-audience",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-audience-mapper",

@@ -9,11 +9,11 @@ Implementado e exercitado:
 - Compose com app, PostgreSQL, Keycloak e LocalStack/SQS;
 - runtime Uber Fx, migrations no startup e health checks;
 - validação OIDC de access token JWT (assinatura/JWKS, issuer, audience e expiração) e claim `provider_id`;
-- `POST /wagering/transactions` para BET, WIN e LOSS;
+- `POST /wallets` para abertura interna autorizada e `POST /wagering/transactions` para operações de provider;
 - idempotência e atomicidade no PostgreSQL;
 - consumer da fila FIFO de operações, inbox atômica e publisher da transactional outbox.
 
-Ainda não implementado: endpoint HTTP autenticado para abrir wallet, autorização interna `wallet:write`, endpoints de consulta de transação/saldo/ledger, reconciliação completa de pending rollback e uma cobertura E2E ampla de workers.
+Ainda não implementado: endpoints de consulta de transação/saldo/ledger, reconciliação completa de pending rollback e uma cobertura E2E ampla de workers.
 
 ## Subir e parar
 
@@ -46,7 +46,32 @@ curl --connect-to keycloak:8080:localhost:8081 \
 
 Use o `access_token` retornado como `Authorization: Bearer ...`. Não troque `keycloak` por `localhost` na URL do token: isso produziria issuer diferente do configurado no app. Os valores acima são apenas credenciais locais do realm importado.
 
-## Operação HTTP disponível
+## Operações HTTP disponíveis
+
+O client interno local usa `internal` / `internal-dev-secret` e precisa da claim `wallet_write`. O token é obtido pelo mesmo endpoint do provider, trocando apenas as credenciais:
+
+```bash
+curl --connect-to keycloak:8080:localhost:8081 \
+  -X POST 'http://keycloak:8080/realms/backend-go/protocol/openid-connect/token' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode 'grant_type=client_credentials' \
+  --data-urlencode 'client_id=internal' \
+  --data-urlencode 'client_secret=internal-dev-secret'
+```
+
+Com esse token, abra a wallet:
+
+```bash
+INTERNAL_TOKEN='cole-o-access_token-interno-aqui'
+curl -i http://localhost:18080/wallets \
+  -H "Authorization: Bearer $INTERNAL_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"playerId":"player-1","initialBalance":{"amount":"100.00","currency":"BRL"}}'
+```
+
+Tokens de provider recebem `403` nessa rota.
+
+### Operação de provider
 
 ```bash
 TOKEN='cole-o-access_token-local-aqui'
@@ -57,7 +82,7 @@ curl -i http://localhost:18080/wagering/transactions \
   -d '{"providerId":"provider-a","externalId":"demo-bet-001","playerId":"player-1","walletId":"wallet-1","gameId":"game-1","roundId":"round-1","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}'
 ```
 
-O body precisa repetir o `provider_id` autenticado. A wallet precisa existir previamente; como o endpoint interno de abertura ainda não existe, esse exemplo só é executável contra uma base preparada por teste/fixture. Não há endpoint de leitura para observar saldo ou ledger.
+O body precisa repetir o `provider_id` autenticado. A wallet precisa existir previamente; use a rota interna acima. Não há endpoint de leitura para observar saldo ou ledger.
 
 ## Testes
 

@@ -100,8 +100,26 @@ func NewProviderIdentity(cfg config.Config) (httpapi.ProviderIdentity, error) {
 	return httpapi.OIDCProviderIdentity{Verifier: verifier}, nil
 }
 
+func NewInternalIdentity(cfg config.Config) (httpapi.InternalIdentity, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.OIDCDiscoveryTimeout)
+	defer cancel()
+	verifier, err := oidcadapter.NewTokenVerifier(ctx, cfg.OIDCIssuerURL, cfg.OIDCAudience)
+	if err != nil {
+		return nil, err
+	}
+	return httpapi.OIDCInternalIdentity{Verifier: verifier}, nil
+}
+
 func NewTransactionHandler(pool *postgres.Pool, identity httpapi.ProviderIdentity) *httpapi.TransactionHandler {
 	return &httpapi.TransactionHandler{Identity: identity, Executor: NewProcessWagerService(pool), Now: time.Now, ID: NewID}
+}
+
+func NewOpenWalletService(pool *postgres.Pool) application.OpenWalletService {
+	return application.OpenWalletService{Manager: postgres.NewTxManager(pool), Wallets: postgres.WalletRepository{}, Transactions: postgres.TransactionRepository{}, Ledger: postgres.LedgerRepository{}, Outbox: postgres.OutboxRepository{}}
+}
+
+func NewInternalWalletHandler(identity httpapi.InternalIdentity, opener application.OpenWalletService) *httpapi.InternalWalletHandler {
+	return &httpapi.InternalWalletHandler{Identity: identity, Opener: opener, Now: time.Now, ID: NewID}
 }
 
 func NewProcessWagerService(pool *postgres.Pool) application.ProcessWagerService {
@@ -135,16 +153,17 @@ func NewOutboxPublisher(clients *SQSClients, pool *postgres.Pool) sqs.OutboxPubl
 	return sqs.OutboxPublisher{Client: clients.Events, Repository: postgres.NewOutboxRepository(pool.Pool()), WorkerID: "outbox-publisher"}
 }
 
-func NewRouter(readiness *httpapi.Readiness, transactions *httpapi.TransactionHandler) http.Handler {
+func NewRouter(readiness *httpapi.Readiness, transactions *httpapi.TransactionHandler, wallets *httpapi.InternalWalletHandler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/health/", httpapi.NewHealthHandler(readiness))
 	mux.Handle("/wagering/transactions", transactions)
+	mux.Handle("/wallets", wallets)
 	return mux
 }
 
 func Module() fx.Option {
 	return fx.Options(
-		fx.Provide(config.Load, NewLogger, httpapi.NewReadiness, NewPool, NewProviderIdentity, NewRouter, NewProcessWagerService, NewTransactionHandler, NewSQSClients, NewOperationsConsumer, NewOutboxPublisher),
+		fx.Provide(config.Load, NewLogger, httpapi.NewReadiness, NewPool, NewProviderIdentity, NewInternalIdentity, NewRouter, NewProcessWagerService, NewTransactionHandler, NewOpenWalletService, NewInternalWalletHandler, NewSQSClients, NewOperationsConsumer, NewOutboxPublisher),
 		fx.Invoke(RegisterHTTPServer, RegisterPoolLifecycle, RegisterWorkers),
 	)
 }
