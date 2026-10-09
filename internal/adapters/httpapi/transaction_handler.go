@@ -24,14 +24,15 @@ type TransactionHandler struct {
 	MaxBytes int64
 }
 type wagerRequest struct {
-	ProviderID string                      `json:"providerId"`
-	ExternalID string                      `json:"externalId"`
-	PlayerID   string                      `json:"playerId"`
-	WalletID   string                      `json:"walletId"`
-	GameID     string                      `json:"gameId"`
-	RoundID    string                      `json:"roundId"`
-	Kind       domain.WagerTransactionType `json:"kind"`
-	Amount     domain.Money                `json:"money"`
+	ProviderID          string                      `json:"providerId"`
+	ExternalID          string                      `json:"externalTransactionId"`
+	PlayerID            string                      `json:"playerId"`
+	WalletID            string                      `json:"walletId"`
+	GameID              string                      `json:"gameId"`
+	RoundID             string                      `json:"roundId"`
+	Kind                domain.WagerTransactionType `json:"kind"`
+	Amount              domain.Money                `json:"money"`
+	ReferenceExternalID string                      `json:"referenceExternalTransactionId"`
 }
 type wagerResponse struct {
 	TransactionID    string       `json:"transactionId"`
@@ -90,8 +91,12 @@ func (h TransactionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provider mismatch", 403)
 		return
 	}
-	if in.Kind != domain.TransactionBet && in.Kind != domain.TransactionWin && in.Kind != domain.TransactionLoss {
+	if in.Kind != domain.TransactionBet && in.Kind != domain.TransactionWin && in.Kind != domain.TransactionLoss && in.Kind != domain.TransactionRefund && in.Kind != domain.TransactionRollback {
 		http.Error(w, "invalid kind", 400)
+		return
+	}
+	if ((in.Kind == domain.TransactionRefund || in.Kind == domain.TransactionRollback) && in.ReferenceExternalID == "") || ((in.Kind == domain.TransactionBet || in.Kind == domain.TransactionLoss) && in.ReferenceExternalID != "") {
+		http.Error(w, "invalid reference", 400)
 		return
 	}
 	if h.Executor == nil || h.Now == nil || h.ID == nil {
@@ -100,7 +105,7 @@ func (h TransactionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	id := h.ID()
 	now := h.Now()
-	res, e := h.Executor.ExecuteResult(r.Context(), application.ProcessWagerCommand{ID: id, ProviderID: p.ProviderID, ExternalID: in.ExternalID, IdempotencyKey: key, PlayerID: in.PlayerID, WalletID: in.WalletID, GameID: in.GameID, RoundID: in.RoundID, Kind: in.Kind, Amount: in.Amount, Now: now, TransactionID: id + "-ledger", ProcessedEventID: id + "-processed", RejectedEventID: id + "-rejected", BalanceEventID: id + "-balance"})
+	res, e := h.Executor.ExecuteResult(r.Context(), application.ProcessWagerCommand{ID: id, ProviderID: p.ProviderID, ExternalID: in.ExternalID, IdempotencyKey: key, PlayerID: in.PlayerID, WalletID: in.WalletID, GameID: in.GameID, RoundID: in.RoundID, Kind: in.Kind, Amount: in.Amount, ReferenceExternalID: in.ReferenceExternalID, Now: now, TransactionID: id + "-ledger", ProcessedEventID: id + "-processed", RejectedEventID: id + "-rejected", BalanceEventID: id + "-balance"})
 	if e != nil {
 		switch {
 		case errors.Is(e, application.ErrWalletNotFound):

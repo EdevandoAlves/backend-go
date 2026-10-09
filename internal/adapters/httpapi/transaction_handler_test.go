@@ -46,7 +46,7 @@ func handler(exec *fakeExecutor, identity ProviderIdentity) TransactionHandler {
 	return TransactionHandler{Identity: identity, Executor: exec, Now: func() time.Time { return time.Unix(100, 0) }, ID: func() string { return "generated" }}
 }
 func TestTransactionHandlerSecurityAndValidation(t *testing.T) {
-	valid := `{"providerId":"provider","externalId":"external","playerId":"player","walletId":"wallet","gameId":"game","roundId":"round","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`
+	valid := `{"providerId":"provider","externalTransactionId":"external","playerId":"player","walletId":"wallet","gameId":"game","roundId":"round","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`
 	tests := []struct {
 		name, body, content string
 		identity            ProviderIdentity
@@ -58,8 +58,13 @@ func TestTransactionHandlerSecurityAndValidation(t *testing.T) {
 		{"mismatch", strings.Replace(valid, `"providerId":"provider"`, `"providerId":"other"`, 1), "application/json", fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}, 403, 0},
 		{"number", strings.Replace(valid, `{"amount":"1.00","currency":"BRL"}`, `{"amount":1,"currency":"BRL"}`, 1), "application/json", fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}, 400, 0},
 		{"unknown", strings.TrimSuffix(valid, "}") + `,"unknown":true}`, "application/json", fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}, 400, 0},
+		{"legacy external id", strings.Replace(valid, "externalTransactionId", "externalId", 1), "application/json", fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}, 400, 0},
 		{"second document", valid + valid, "application/json", fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}, 400, 0},
 		{"content type", valid, "text/plain", fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}, 400, 0},
+		{"refund requires reference", strings.Replace(valid, `"kind":"BET"`, `"kind":"REFUND"`, 1), "application/json", fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}, 400, 0},
+		{"rollback requires reference", strings.Replace(valid, `"kind":"BET"`, `"kind":"ROLLBACK"`, 1), "application/json", fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}, 400, 0},
+		{"bet rejects reference", strings.TrimSuffix(valid, "}") + `,"referenceExternalTransactionId":"reference"}`, "application/json", fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}, 400, 0},
+		{"loss rejects reference", strings.Replace(strings.TrimSuffix(valid, "}")+`,"referenceExternalTransactionId":"reference"}`, `"kind":"BET"`, `"kind":"LOSS"`, 1), "application/json", fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}, 400, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -89,7 +94,7 @@ func TestTransactionHandlerSecurityAndValidation(t *testing.T) {
 	})
 }
 func TestTransactionHandlerResponsesAndCommand(t *testing.T) {
-	valid := `{"providerId":"provider","externalId":"external","playerId":"player","walletId":"wallet","gameId":"game","roundId":"round","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`
+	valid := `{"providerId":"provider","externalTransactionId":"external","playerId":"player","walletId":"wallet","gameId":"game","roundId":"round","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`
 	t.Run("success", func(t *testing.T) {
 		e := &fakeExecutor{result: application.ProcessWagerResult{Status: domain.TransactionProcessed, Balance: mustMoney(t, "9.00")}}
 		r := request(valid)
@@ -110,6 +115,27 @@ func TestTransactionHandlerResponsesAndCommand(t *testing.T) {
 			t.Fatalf("response=%v", out)
 		}
 	})
+	for _, tc := range []struct {
+		kind, reference string
+	}{
+		{"WIN", ""},
+		{"WIN", "win-reference"},
+		{"REFUND", "refund-reference"},
+		{"ROLLBACK", "rollback-reference"},
+	} {
+		t.Run(tc.kind+tc.reference, func(t *testing.T) {
+			e := &fakeExecutor{result: application.ProcessWagerResult{Status: domain.TransactionProcessed}}
+			body := strings.Replace(valid, `"kind":"BET"`, `"kind":"`+tc.kind+`"`, 1)
+			if tc.reference != "" {
+				body = strings.TrimSuffix(body, "}") + `,"referenceExternalTransactionId":"` + tc.reference + `"}`
+			}
+			w := httptest.NewRecorder()
+			handler(e, fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}).ServeHTTP(w, request(body))
+			if w.Code != http.StatusCreated || e.command.ReferenceExternalID != tc.reference || e.command.Kind != domain.WagerTransactionType(tc.kind) {
+				t.Fatalf("status=%d command=%+v", w.Code, e.command)
+			}
+		})
+	}
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -155,7 +181,7 @@ func TestTransactionHandlerReplayRejectedUsesPersistedResult(t *testing.T) {
 		IdempotentReplay: true,
 	}}
 	w := httptest.NewRecorder()
-	handler(e, fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}).ServeHTTP(w, request(`{"providerId":"provider","externalId":"external","playerId":"player","walletId":"wallet","gameId":"game","roundId":"round","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`))
+	handler(e, fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}).ServeHTTP(w, request(`{"providerId":"provider","externalTransactionId":"external","playerId":"player","walletId":"wallet","gameId":"game","roundId":"round","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -173,7 +199,7 @@ func TestTransactionHandlerMapsIdempotencyAndExternalConflicts(t *testing.T) {
 		t.Run(conflict.Error(), func(t *testing.T) {
 			e := &fakeExecutor{err: conflict}
 			w := httptest.NewRecorder()
-			handler(e, fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}).ServeHTTP(w, request(`{"providerId":"provider","externalId":"external","playerId":"player","walletId":"wallet","gameId":"game","roundId":"round","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`))
+			handler(e, fakeIdentity{principal: ProviderPrincipal{ProviderID: "provider"}}).ServeHTTP(w, request(`{"providerId":"provider","externalTransactionId":"external","playerId":"player","walletId":"wallet","gameId":"game","roundId":"round","kind":"BET","money":{"amount":"1.00","currency":"BRL"}}`))
 			if w.Code != http.StatusConflict {
 				t.Fatalf("status=%d", w.Code)
 			}
