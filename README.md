@@ -29,6 +29,8 @@ docker compose down
 
 `docker compose down -v` também remove o volume local do PostgreSQL.
 
+Na primeira inicialização, o Keycloak pode levar algum tempo para subir e importar o realm. Aguarde o serviço ficar saudável antes de solicitar tokens; o app depende dessa prontidão para fazer o discovery OIDC.
+
 O Compose expõe a API em `localhost:18080`, PostgreSQL em `localhost:5433`, Keycloak em `localhost:8081` e LocalStack em `localhost:4566`. As filas são `operations.fifo`, `operations-dlq.fifo` e `events.fifo`.
 
 ## Token de provider
@@ -88,6 +90,32 @@ curl -i http://localhost:18080/wagering/transactions \
 ```
 
 O body precisa repetir o `provider_id` autenticado. A wallet precisa existir previamente; use a rota interna acima. Não há endpoint de leitura para observar saldo ou ledger.
+
+### Operação SQS
+
+Com o Compose ativo e `WALLET_ID` definido pelo exemplo acima, liste as filas e envie um BET FIFO com IDs diferentes do exemplo HTTP:
+
+```bash
+docker compose exec -T localstack awslocal sqs list-queues
+
+SQS_MESSAGE_ID='sqs-demo-20261008-001'
+SQS_EXTERNAL_ID='sqs-demo-external-20261008-001'
+SQS_IDEMPOTENCY_KEY='sqs-demo-idem-20261008-001'
+docker compose exec -T localstack awslocal sqs send-message \
+  --queue-url 'http://localhost:4566/000000000000/operations.fifo' \
+  --message-group-id 'provider-a-sqs-demo-20261008' \
+  --message-deduplication-id 'sqs-demo-dedup-20261008-001' \
+  --message-body "{\"messageId\":\"$SQS_MESSAGE_ID\",\"version\":1,\"type\":\"WagerTransactionRequested\",\"occurredAt\":\"2026-10-08T12:00:00Z\",\"data\":{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$SQS_EXTERNAL_ID\",\"idempotencyKey\":\"$SQS_IDEMPOTENCY_KEY\",\"playerId\":\"player-1\",\"walletId\":\"$WALLET_ID\",\"gameId\":\"game-sqs-1\",\"roundId\":\"round-sqs-20261008-001\",\"kind\":\"BET\",\"money\":{\"amount\":\"2.00\",\"currency\":\"BRL\"},\"referenceExternalTransactionId\":null}}"
+```
+
+O consumer processa a mensagem e o publisher envia o evento para `events.fifo`. Receba os eventos disponíveis (a fila pode conter eventos de execuções anteriores):
+
+```bash
+docker compose exec -T localstack awslocal sqs receive-message \
+  --queue-url 'http://localhost:4566/000000000000/events.fifo' \
+  --max-number-of-messages 10 \
+  --wait-time-seconds 10
+```
 
 ## Testes
 
